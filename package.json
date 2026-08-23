@@ -1,0 +1,42 @@
+{
+  "name": "aiflow-official-codex-probe",
+  "displayName": "Aiflow Official Codex Probe",
+  "description": "Version-gated feasibility probe for the official Codex VS Code extension.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "local-aiflow",
+  "engines": {
+    "vscode": "^1.96.2"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:aiflow.runOfficialCodexProbe",
+    "onCommand:aiflow.cancelOfficialCodexProbe"
+  ],
+  "main": "./dist/src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiflow.runOfficialCodexProbe",
+        "title": "Run Official Codex Probe",
+        "category": "Aiflow"
+      },
+      {
+        "command": "aiflow.cancelOfficialCodexProbe",
+        "title": "Cancel Official Codex Probe",
+        "category": "Aiflow"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "test": "npm run compile && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.8.3"
+  }
+}
