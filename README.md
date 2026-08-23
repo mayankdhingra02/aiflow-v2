@@ -84,6 +84,14 @@ After the worker reaches a terminal outcome, Aiflow independently reads the bran
 after the base (at most 100), worktree status, upstream identity, and the exact remote branch SHA via
 read-only `git ls-remote`. A remote-tracking ref is never used as the sole push proof.
 
+The preflight upstream target is immutable for the run: its remote name, upstream ref, and derived
+`refs/heads/...` branch ref are retained separately. Postflight checks the currently configured
+upstream only for integrity; it never redirects verification to a new upstream. Changing or removing
+that configuration therefore cannot produce `verified`. The read-only remote query is issued only for
+the original remote and original branch ref, and its output must be exactly one full object ID paired
+with that exact ref. Empty output means no remote branch; malformed, duplicate, or mismatched output
+is an inspection failure.
+
 ```ts
 interface GitImplementationRunRequest extends OfficialCodexRunRequest {
   expectedGitHubRepository: string;
@@ -111,6 +119,12 @@ an inspection exception is `git_inspection_failed`. Otherwise the status is `ver
 requires a completed Codex result, matching repository and branch, preserved base ancestry, at least
 one new commit, a clean tree, and a remote branch SHA exactly equal to local HEAD. A failed verification
 does not redispatch Codex.
+
+Expected integrity mismatches fail closed with their deterministic delivery status: detached or changed
+branch is `branch_changed`, replacement history is `history_rewritten`, no new commit is `no_commit`,
+dirty state is `working_tree_dirty`, repository identity drift is `repository_mismatch`, and changed
+upstream or remote proof is `push_not_verified`. Only a real command timeout, malformed Git response,
+or unreadable repository is `git_inspection_failed`.
 
 The visible workflow reads the clipboard exactly, snapshots the clean Git state before model choices,
 then shows a modal with repository, branch, short base SHA, selected model/ID and reasoning, UTF-8
@@ -201,4 +215,5 @@ Confirm the modal’s exact repository, branch, and base SHA before starting. Re
 a clean final worktree, remote branch SHA equal to local HEAD, delivery status `verified`, and a review
 envelope naming the same repository and head SHA. In a second run, use the existing cancellation command
 and verify it still targets only one exact turn. This integration is private and version-specific to
-the pinned official Codex extension; do not run live turns or GitHub network calls in automated tests.
+the pinned official Codex extension; the original preflight upstream branch remains the only verified
+destination. Do not run live turns or GitHub network calls in automated tests.

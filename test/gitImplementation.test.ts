@@ -3,11 +3,12 @@ import { test } from "node:test";
 
 import {
   createImplementationReviewEnvelope,
+  GitImplementationError,
   serializeImplementationReviewEnvelope,
   validateGitImplementationRunRequest,
   type GitImplementationRunRequest,
 } from "../src/gitImplementationContracts";
-import { GitInspection, GitInspectionError, parseGitHubRepository, type GitRunner } from "../src/gitInspection";
+import { GitInspection, isSafeRemoteName, parseGitHubRepository, type GitRunner } from "../src/gitInspection";
 import { GitImplementationCommandController, type GitImplementationCommandUi, type GitImplementationRunService } from "../src/gitImplementationCommands";
 import { GitImplementationService } from "../src/gitImplementationService";
 import type { OfficialCodexRunResult } from "../src/officialCodexContracts";
@@ -36,7 +37,7 @@ test("preflight rejects dirty, untracked, detached, branch/base/repository and u
     const runner = new FixtureGitRunner(mutation);
     const official = new FakeOfficial();
     const service = makeGitService(official, runner);
-    await assert.rejects(service.run(requestFor()), GitInspectionError);
+    await assert.rejects(service.run(requestFor()), GitImplementationError);
     assert.equal(official.requests.length, 0, mutation);
   }
 });
@@ -70,13 +71,75 @@ test("delivery status precedence covers no commit, rewritten history, branch, di
   }
 });
 
+test("preflight upstream target remains authoritative when Codex changes, removes, or redirects upstream", async () => {
+  for (const mutation of ["upstream-branch", "upstream-remote", "upstream-removed"] as const) {
+    const runner = new FixtureGitRunner(mutation);
+    const result = await makeGitService(new FakeOfficial(), runner).run(requestFor());
+    assert.equal(result.deliveryStatus, "push_not_verified", mutation);
+    assert.deepEqual(runner.lsRemoteArgs, ["ls-remote", "origin", "refs/heads/main"], mutation);
+    assert.equal(result.git.upstreamRemote, "origin");
+    assert.equal(result.git.upstreamRef, "origin/main");
+  }
+});
+
+test("detached post-run HEAD and rewritten replacement history fail closed before commit enumeration", async () => {
+  const detached = await makeGitService(new FakeOfficial(), new FixtureGitRunner("post-detached")).run(requestFor());
+  assert.equal(detached.deliveryStatus, "branch_changed");
+  const runner = new FixtureGitRunner("rewritten");
+  const rewritten = await makeGitService(new FakeOfficial(), runner).run(requestFor());
+  assert.equal(rewritten.deliveryStatus, "history_rewritten");
+  assert.equal(runner.revListCalls, 0);
+});
+
+test("ls-remote accepts only one exact full SHA/ref response", async () => {
+  const valid = await makeGitService(new FakeOfficial(), new FixtureGitRunner()).run(requestFor());
+  assert.equal(valid.git.remoteHeadSha, HEAD);
+  const empty = await makeGitService(new FakeOfficial(), new FixtureGitRunner("remote-empty")).run(requestFor());
+  assert.equal(empty.deliveryStatus, "push_not_verified");
+  assert.equal(empty.git.remoteHeadSha, null);
+  for (const mutation of ["remote-malformed-sha", "remote-wrong-ref", "remote-duplicate"] as const) {
+    const result = await makeGitService(new FakeOfficial(), new FixtureGitRunner(mutation)).run(requestFor());
+    assert.equal(result.deliveryStatus, "git_inspection_failed", mutation);
+  }
+});
+
+test("remote-name validation and canonical root comparison are conservative", async () => {
+  assert.equal(isSafeRemoteName("origin"), true);
+  assert.equal(isSafeRemoteName("-origin"), false);
+  assert.equal(isSafeRemoteName("origin;rm"), false);
+  const fixture = new FixtureGitRunner();
+  const inspection = new GitInspection(
+    { run: async (cwd, args) => args.join(" ") === "rev-parse --show-toplevel" ? "/tmp/workspace\n" : fixture.run(cwd, args) },
+    async (value) => value === "/tmp/workspace" ? "/private/tmp/workspace" : value,
+  );
+  const request = { ...requestFor(), workspacePath: "/private/tmp/workspace" };
+  await inspection.preflight(request.workspacePath, request);
+});
+
+test("Git workflow errors are typed and omit prompt, URLs, credentials, and paths", async () => {
+  const prompt = "DO-NOT-LEAK-this-complete-prompt";
+  const invalid = makeGitService(new FakeOfficial(), new FixtureGitRunner());
+  await assert.rejects(invalid.run({ ...requestFor(prompt), expectedBaseSha: "bad" }), (error: unknown) => {
+    assert.ok(error instanceof GitImplementationError);
+    assert.equal((error as Error).message.includes(prompt), false);
+    return true;
+  });
+  const preflight = makeGitService(new FakeOfficial(), new FixtureGitRunner("repository"));
+  await assert.rejects(preflight.run(requestFor(prompt)), (error: unknown) => {
+    assert.ok(error instanceof GitImplementationError);
+    assert.equal(String(error).includes("secret"), false);
+    assert.equal(String(error).includes(prompt), false);
+    return true;
+  });
+});
+
 test("post-run inspection failure is deterministic and remote URLs never enter errors", async () => {
   const official = new FakeOfficial();
   const runner = new FixtureGitRunner("timeout");
   const service = makeGitService(official, runner);
   const result = await service.run(requestFor());
   assert.equal(result.deliveryStatus, "git_inspection_failed");
-  await assert.rejects(new GitInspection(new FixtureGitRunner("repository")).preflight(WORKSPACE, requestFor()), (error: unknown) => {
+  await assert.rejects(new GitInspection(new FixtureGitRunner("repository"), async (path) => path).preflight(WORKSPACE, requestFor()), (error: unknown) => {
     assert.equal(String(error).includes("secret"), false);
     return true;
   });
@@ -99,7 +162,7 @@ test("concurrent Git implementation execution is rejected at the service boundar
   official.wait = waiting;
   const service = makeGitService(official, new FixtureGitRunner());
   const first = service.run(requestFor());
-  await assert.rejects(service.run(requestFor("second")), GitInspectionError);
+  await assert.rejects(service.run(requestFor("second")), GitImplementationError);
   release();
   await first;
 });
@@ -117,13 +180,15 @@ test("Git clipboard command uses the shared service, preserves the exact prompt,
   ui.confirm = false;
   await controller.runClipboard();
   assert.equal(service.requests.length, 1);
-  await assert.rejects(controller.runProgrammatic({}), /Official Codex run request/);
+  await assert.rejects(controller.runProgrammatic({}), GitImplementationError);
 });
 
-type FixtureMutation = "normal" | "dirty" | "detached" | "branch" | "base" | "repository" | "upstream" | "no-commit" | "rewritten" | "post-branch" | "post-dirty" | "remote-mismatch" | "timeout";
+type FixtureMutation = "normal" | "dirty" | "detached" | "branch" | "base" | "repository" | "upstream" | "no-commit" | "rewritten" | "post-branch" | "post-detached" | "post-dirty" | "post-repository" | "upstream-branch" | "upstream-remote" | "upstream-removed" | "remote-mismatch" | "remote-empty" | "remote-malformed-sha" | "remote-wrong-ref" | "remote-duplicate" | "timeout";
 
 class FixtureGitRunner implements GitRunner {
   private preflightComplete = false;
+  lsRemoteArgs: string[] | undefined;
+  revListCalls = 0;
   constructor(private readonly mutation: FixtureMutation = "normal") {}
 
   async run(_cwd: string, args: readonly string[]): Promise<string> {
@@ -132,26 +197,39 @@ class FixtureGitRunner implements GitRunner {
     if (this.mutation === "timeout" && post && command.startsWith("ls-remote")) throw new Error("timed out https://secret@github.com/owner/repository.git");
     if (command === "rev-parse --show-toplevel") return `${WORKSPACE}\n`;
     if (command.startsWith("status")) return this.mutation === "dirty" || (post && this.mutation === "post-dirty") ? "?? untracked\n" : "";
-    if (command === "symbolic-ref --quiet --short HEAD") {
-      if (this.mutation === "detached") throw new Error("detached");
+    if (command === "branch --show-current") {
+      if (this.mutation === "detached" || (post && this.mutation === "post-detached")) return "";
       return `${post && this.mutation === "post-branch" ? "other" : this.mutation === "branch" ? "wrong" : "main"}\n`;
     }
     if (command === "rev-parse HEAD") return `${this.mutation === "base" && !post ? HEAD : post ? HEAD : BASE}\n`;
     if (command.startsWith("rev-parse --verify")) return `${BASE}\n`;
-    if (command === "rev-parse --abbrev-ref --symbolic-full-name @{upstream}") {
-      if (this.mutation === "upstream") throw new Error("no upstream");
+    if (command === "for-each-ref --format=%(upstream:short) HEAD") {
+      if (this.mutation === "upstream") return "";
+      if (post && this.mutation === "upstream-branch") return "origin/other\n";
+      if (post && this.mutation === "upstream-remote") return "other/main\n";
+      if (post && this.mutation === "upstream-removed") return "";
       return "origin/main\n";
     }
     if (command === "remote get-url origin") {
-      const result = this.mutation === "repository" ? "https://secret@github.com/other/repo.git\n" : "https://github.com/Owner/repository.git\n";
-      this.preflightComplete = true;
+      const result = this.mutation === "repository" ? "https://secret@github.com/other/repo.git\n"
+        : post && this.mutation === "post-repository" ? "https://github.com/other/repository.git\n"
+          : "https://github.com/Owner/repository.git\n";
+      if (!post) this.preflightComplete = true;
       return result;
     }
-    if (command.startsWith("rev-list")) return this.mutation === "no-commit" ? "" : `${HEAD}\n`;
-    if (command.startsWith("ls-remote")) return this.mutation === "remote-mismatch" ? `${BASE}\trefs/heads/main\n` : `${HEAD}\trefs/heads/main\n`;
+    if (command === "remote") return "origin\nother\n";
+    if (command.startsWith("rev-list")) { this.revListCalls += 1; return this.mutation === "no-commit" ? "" : `${HEAD}\n`; }
+    if (command.startsWith("ls-remote")) {
+      this.lsRemoteArgs = [...args];
+      if (this.mutation === "remote-empty") return "";
+      if (this.mutation === "remote-malformed-sha") return `not-a-sha\trefs/heads/main\n`;
+      if (this.mutation === "remote-wrong-ref") return `${HEAD}\trefs/heads/other\n`;
+      if (this.mutation === "remote-duplicate") return `${HEAD}\trefs/heads/main\n${HEAD}\trefs/heads/main\n`;
+      return this.mutation === "remote-mismatch" ? `${BASE}\trefs/heads/main\n` : `${HEAD}\trefs/heads/main\n`;
+    }
     if (command.startsWith("merge-base")) {
-      if (this.mutation === "rewritten") throw new Error("not ancestor");
-      return "";
+      if (this.mutation === "rewritten") return `${"c".repeat(40)}\n`;
+      return `${BASE}\n`;
     }
     throw new Error(`unexpected fixed git command: ${command}`);
   }
@@ -177,7 +255,7 @@ class FakeOfficial {
 
 class FakeGitCommandService implements GitImplementationRunService {
   requests: GitImplementationRunRequest[] = [];
-  async snapshot() { return { repository: "Owner/repository", branch: "main", baseSha: BASE, upstreamRemote: "origin", upstreamRef: "origin/main" }; }
+  async snapshot() { return { repository: "Owner/repository", branch: "main", baseSha: BASE, upstreamRemote: "origin", upstreamRef: "origin/main", remoteBranchRef: "refs/heads/main" }; }
   async run(argument: unknown) {
     const request = argument as GitImplementationRunRequest;
     this.requests.push(request);
@@ -212,5 +290,5 @@ function requestFor(prompt = "implement this exactly"): GitImplementationRunRequ
 }
 
 function makeGitService(official: FakeOfficial, runner: GitRunner): GitImplementationService {
-  return new GitImplementationService(official, new GitInspection(runner), async (workspacePath) => workspacePath);
+  return new GitImplementationService(official, new GitInspection(runner, async (value) => value), async (workspacePath) => workspacePath);
 }

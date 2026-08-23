@@ -23,6 +23,29 @@ export type GitDeliveryStatus =
   | "push_not_verified"
   | "git_inspection_failed";
 
+export type GitImplementationErrorCode =
+  | "INVALID_REQUEST"
+  | "RUN_ACTIVE"
+  | "GIT_PREFLIGHT_FAILED"
+  | "GIT_EXECUTION_FAILED"
+  | "GIT_INSPECTION_FAILED";
+
+export class GitImplementationError extends Error {
+  constructor(public readonly code: GitImplementationErrorCode, message: string) {
+    super(boundedSingleLine(message));
+    this.name = "GitImplementationError";
+  }
+}
+
+export function gitImplementationError(
+  error: unknown,
+  fallbackCode: GitImplementationErrorCode,
+  fallbackMessage: string,
+): GitImplementationError {
+  if (error instanceof GitImplementationError) return error;
+  return new GitImplementationError(fallbackCode, fallbackMessage);
+}
+
 export interface GitDeliveryEvidence {
   githubRepository: string;
   branch: string;
@@ -127,4 +150,9 @@ export function serializeImplementationReviewEnvelope(
 function boundedFinalResponse(value: string): string {
   const maximumLength = 4_000;
   return value.length <= maximumLength ? value : `${value.slice(0, maximumLength - 1)}…`;
+}
+
+function boundedSingleLine(value: string): string {
+  const singleLine = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  return singleLine.length <= 400 ? singleLine : `${singleLine.slice(0, 399)}…`;
 }

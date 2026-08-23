@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   createImplementationReviewEnvelope,
+  gitImplementationError,
   serializeImplementationReviewEnvelope,
   validateGitImplementationRunRequest,
   type GitImplementationRunResult,
@@ -39,7 +40,7 @@ export class GitImplementationCommandController {
       this.log(result);
       return result;
     } catch (error) {
-      throw this.report(error);
+      throw this.report(error, "INVALID_REQUEST", "Git implementation request is invalid");
     }
   }
 
@@ -72,7 +73,7 @@ export class GitImplementationCommandController {
       this.log(result);
       return result;
     } catch (error) {
-      throw this.report(error);
+      throw this.report(error, "INVALID_REQUEST", "Git implementation request is invalid");
     }
   }
 
@@ -98,10 +99,15 @@ export class GitImplementationCommandController {
     this.ui.appendOutput(`review envelope: ${serializeImplementationReviewEnvelope(createImplementationReviewEnvelope(result))}`);
   }
 
-  private report(error: unknown): Error {
-    const message = error instanceof Error ? boundedText(error.message, 300) : "Git implementation operation failed";
-    this.ui.appendOutput(`error: ${message}`);
-    this.ui.showError(`Aiflow Git delivery failed: ${message}`);
-    return error instanceof Error ? error : new Error("Git implementation operation failed");
+  private report(
+    error: unknown,
+    fallbackCode: "INVALID_REQUEST" | "GIT_EXECUTION_FAILED",
+    fallbackMessage: string,
+  ) {
+    const typed = gitImplementationError(error, fallbackCode, fallbackMessage);
+    const message = boundedText(typed.message, 300);
+    this.ui.appendOutput(`error [${typed.code}]: ${message}`);
+    this.ui.showError(`Aiflow Git delivery failed [${typed.code}]: ${message}`);
+    return typed;
   }
 }

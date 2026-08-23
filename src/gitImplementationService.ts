@@ -3,10 +3,13 @@ import {
   type GitDeliveryStatus,
   type GitImplementationRunRequest,
   type GitImplementationRunResult,
+  GitImplementationError,
+  gitImplementationError,
   repositoryIdentityEquals,
   validateGitImplementationRunRequest,
 } from "./gitImplementationContracts";
-import { GitInspection, GitInspectionError, type GitPreflight } from "./gitInspection";
+import type { OfficialCodexRunResult } from "./officialCodexContracts";
+import { GitInspection, type GitPreflight } from "./gitInspection";
 import { canonicalWorkspacePath } from "./officialCodexContracts";
 import type { OfficialCodexRunService } from "./officialCodexCommands";
 
@@ -20,30 +23,49 @@ export class GitImplementationService {
   ) {}
 
   async snapshot(workspacePath: string): Promise<GitPreflight> {
-    return this.git.snapshot(await this.authorizeWorkspace(workspacePath));
+    try {
+      return await this.git.snapshot(await this.authorizeWorkspace(workspacePath));
+    } catch (error) {
+      throw gitImplementationError(error, "GIT_PREFLIGHT_FAILED", "Git preflight failed");
+    }
   }
 
   async run(argument: unknown): Promise<GitImplementationRunResult> {
-    validateGitImplementationRunRequest(argument);
-    if (this.active) throw new GitInspectionError("RUN_ACTIVE", "A Git implementation run is already active");
+    try {
+      validateGitImplementationRunRequest(argument);
+    } catch (error) {
+      throw gitImplementationError(error, "INVALID_REQUEST", "Git implementation request is invalid");
+    }
+    if (this.active) throw new GitImplementationError("RUN_ACTIVE", "A Git implementation run is already active");
     this.active = true;
     try {
-      const workspacePath = await this.authorizeWorkspace(argument.workspacePath);
-      const request = { ...argument, workspacePath };
-      const preflight = await this.git.preflight(workspacePath, request);
-      const codex = await this.officialCodex.run(request);
+      let workspacePath: string;
+      let request: GitImplementationRunRequest;
+      let preflight: GitPreflight;
       try {
-        const evidence = await this.git.inspectAfterRun(workspacePath, preflight);
-        const isAncestor = await this.git.isBaseAncestor(workspacePath, preflight.baseSha, evidence.headSha);
+        workspacePath = await this.authorizeWorkspace(argument.workspacePath);
+        request = { ...argument, workspacePath };
+        preflight = await this.git.preflight(workspacePath, request);
+      } catch (error) {
+        throw gitImplementationError(error, "GIT_PREFLIGHT_FAILED", "Git preflight failed");
+      }
+      let codex: OfficialCodexRunResult;
+      try {
+        codex = await this.officialCodex.run(request);
+      } catch (error) {
+        throw gitImplementationError(error, "GIT_EXECUTION_FAILED", "Official Codex execution failed");
+      }
+      try {
+        const inspection = await this.git.inspectAfterRun(workspacePath, preflight);
         return {
           runId: request.runId,
-          deliveryStatus: deliveryStatus(codex.outcome, request, preflight, evidence, isAncestor),
+          deliveryStatus: deliveryStatus(codex.outcome, request, preflight, inspection.evidence, inspection.baseIsAncestor, inspection.upstreamUnchanged),
           codex,
-          git: evidence,
+          git: inspection.evidence,
         };
       } catch {
         return {
-          runId: argument.runId,
+          runId: request.runId,
           deliveryStatus: "git_inspection_failed",
           codex,
           git: unavailableEvidence(preflight),
@@ -80,6 +102,7 @@ export function deliveryStatus(
   preflight: GitPreflight,
   evidence: GitDeliveryEvidence,
   baseIsAncestor: boolean,
+  upstreamUnchanged: boolean,
 ): GitDeliveryStatus {
   if (outcome !== "completed") return "codex_not_completed";
   if (!repositoryIdentityEquals(evidence.githubRepository, request.expectedGitHubRepository) || !repositoryIdentityEquals(evidence.githubRepository, preflight.repository)) return "repository_mismatch";
@@ -87,6 +110,7 @@ export function deliveryStatus(
   if (!baseIsAncestor) return "history_rewritten";
   if (evidence.commitShas.length === 0) return "no_commit";
   if (!evidence.workingTreeClean) return "working_tree_dirty";
+  if (!upstreamUnchanged) return "push_not_verified";
   if (!evidence.pushVerified) return "push_not_verified";
   return "verified";
 }
