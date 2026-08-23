@@ -14,15 +14,44 @@ export const IPC_METHOD_VERSIONS = {
 export const IPC_REQUEST_TIMEOUT_MS = 5_000;
 export const IPC_CONNECT_TIMEOUT_MS = 5_000;
 export const BOOTSTRAP_TIMEOUT_MS = 120_000;
-// The accepted Phase 3 implementation run completed after roughly 142 seconds.
-// Leave margin for the same supported exact-turn record shape without replaying a prompt.
-export const REAL_TURN_TIMEOUT_MS = 180_000;
+export const DEFAULT_REAL_TURN_TIMEOUT_MINUTES = 60;
+export const MIN_REAL_TURN_TIMEOUT_MINUTES = 3;
+export const MAX_REAL_TURN_TIMEOUT_MINUTES = 240;
+export const MILLISECONDS_PER_MINUTE = 60_000;
+export const REAL_TURN_TIMEOUT_MS = DEFAULT_REAL_TURN_TIMEOUT_MINUTES * MILLISECONDS_PER_MINUTE;
 export const SESSION_POLL_INTERVAL_MS = 500;
 
 export type ProbeIpcMethod = keyof typeof IPC_METHOD_VERSIONS;
 
 export function ipcVersionFor(method: ProbeIpcMethod): number {
   return IPC_METHOD_VERSIONS[method];
+}
+
+export type OfficialCodexConfigurationErrorCode = "INVALID_CONFIGURATION";
+
+export class OfficialCodexConfigurationError extends Error {
+  readonly code: OfficialCodexConfigurationErrorCode = "INVALID_CONFIGURATION";
+
+  constructor(message: string) {
+    super(boundedErrorMessage(message));
+    this.name = "OfficialCodexConfigurationError";
+  }
+}
+
+export function resolveRealTurnTimeoutMs(value: unknown): number {
+  if (value === undefined) return REAL_TURN_TIMEOUT_MS;
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < MIN_REAL_TURN_TIMEOUT_MINUTES ||
+    value > MAX_REAL_TURN_TIMEOUT_MINUTES
+  ) {
+    throw new OfficialCodexConfigurationError(
+      `aiflow.officialCodex.realTurnTimeoutMinutes must be a finite integer from ${MIN_REAL_TURN_TIMEOUT_MINUTES} through ${MAX_REAL_TURN_TIMEOUT_MINUTES}`,
+    );
+  }
+  return value * MILLISECONDS_PER_MINUTE;
 }
 
 export function assertSupportedExtensionVersion(version: unknown): asserts version is string {

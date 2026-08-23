@@ -261,6 +261,7 @@ export class OfficialCodexWorker {
         this.options.log?.(
           `watcher timeout: conversation=${diagnostics.conversationId} ` +
           `turn=${diagnostics.knownTurnId ?? "<none>"} ` +
+          `maximumDurationMs=${diagnostics.maximumDurationMs} ` +
           `session=${diagnostics.sessionFilename} ` +
           `turnObserved=${diagnostics.knownTurnObserved} ` +
           `promptObserved=${diagnostics.exactPromptObserved} ` +

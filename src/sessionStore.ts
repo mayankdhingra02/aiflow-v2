@@ -47,6 +47,7 @@ export interface TurnResult {
 export interface ExactTurnTimeoutDiagnostics {
   conversationId: string;
   knownTurnId: string | null;
+  maximumDurationMs: number;
   sessionFilename: string;
   knownTurnObserved: boolean;
   exactPromptObserved: boolean;
@@ -197,7 +198,8 @@ export async function waitForExactTurn(options: {
   sessionsRoot?: string;
   onTimeoutDiagnostics?: (diagnostics: ExactTurnTimeoutDiagnostics) => void | Promise<void>;
 }): Promise<TurnResult> {
-  const deadline = Date.now() + (options.timeoutMs ?? REAL_TURN_TIMEOUT_MS);
+  const maximumDurationMs = options.timeoutMs ?? REAL_TURN_TIMEOUT_MS;
+  const deadline = Date.now() + maximumDurationMs;
   let emittedTurnId: string | null = null;
   let lastInspection: TurnInspection | null = null;
 
@@ -248,6 +250,7 @@ export async function waitForExactTurn(options: {
     await options.onTimeoutDiagnostics?.({
       conversationId: options.conversationId,
       knownTurnId: options.knownTurnId,
+      maximumDurationMs,
       sessionFilename: path.basename(options.sessionPath),
       knownTurnObserved: lastInspection?.turnObserved ?? false,
       exactPromptObserved: lastInspection?.promptCorrelated ?? false,

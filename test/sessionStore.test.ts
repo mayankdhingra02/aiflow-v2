@@ -210,8 +210,7 @@ test("sanitized delayed completion fixture uses the observed supported record sh
   assert.equal(inspection.outcome, "completed");
   assert.equal(inspection.turnObserved, true);
   assert.equal(inspection.promptCorrelated, true);
-  // The observed production terminal arrived after the old 120-second limit.
-  assert.ok(REAL_TURN_TIMEOUT_MS >= 180_000);
+  assert.equal(REAL_TURN_TIMEOUT_MS, 60 * 60_000);
 });
 
 test("known turn ID rejects a prompt correlated to a different new turn", () => {
@@ -334,6 +333,7 @@ test("timeout diagnostics are bounded and describe only exact-turn correlation s
     assert.deepEqual(diagnostics, {
       conversationId: "conversation",
       knownTurnId: "known-turn",
+      maximumDurationMs: 5,
       sessionFilename: "timeout.jsonl",
       knownTurnObserved: false,
       exactPromptObserved: false,

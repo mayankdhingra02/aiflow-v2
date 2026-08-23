@@ -24,6 +24,11 @@ paths and requires equality, activates the official extension, and enforces the 
 The worker then performs bootstrap, applies model/reasoning settings, starts one exact turn,
 watches only the correlated session, and supports exact-turn cancellation.
 
+The maximum duration for one real turn defaults to 60 minutes and can be configured with
+`aiflow.officialCodex.realTurnTimeoutMinutes` from 3 through 240 minutes. Cancellation remains
+available while a long-running turn is active. Changing this timeout never causes automatic prompt
+replay.
+
 Available commands:
 
 - `aiflow.runOfficialCodex` — internal programmatic command; not shown in the Command Palette.

@@ -20,15 +20,18 @@ import {
   type OfficialExtensionResolver,
   type WorkspaceResolver,
 } from "./officialCodexService";
-import { OfficialCodexWorker } from "./officialCodexWorker";
+import { createAppLifetimeOfficialCodexWorker } from "./appLifetimeWorker";
 import { ProbeController } from "./probe";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Aiflow Official Codex Worker");
   const workspaceResolver = createVscodeWorkspaceResolver();
-  const worker = new OfficialCodexWorker({
+  const worker = createAppLifetimeOfficialCodexWorker({
     sessionsRoot: path.join(os.homedir(), ".codex", "sessions"),
     tempRoot: path.join(context.globalStorageUri.fsPath, "worker-temp"),
+    realTurnTimeoutMinutes: vscode.workspace
+      .getConfiguration("aiflow.officialCodex")
+      .get<unknown>("realTurnTimeoutMinutes"),
     authorizeWorkspace: createWorkspaceAuthorizer(workspaceResolver),
     invokeBootstrap: async ({ temporaryFile, workspacePath, instruction }) => {
       await vscode.commands.executeCommand("chatgpt.implementTodo", {

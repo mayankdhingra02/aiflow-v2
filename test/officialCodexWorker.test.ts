@@ -341,7 +341,7 @@ test("bootstrap failure sends zero real prompts and never opens IPC", async () =
   });
 });
 
-test("failure after start-turn does not replay the real prompt and disposes IPC", async () => {
+test("worker-level injected short timeout does not replay the real prompt and disposes IPC", async () => {
   await withFixture(async ({ workspace, sessionsRoot, tempRoot, sessionPath }) => {
     let starts = 0;
     let failedIpc: FakeIpcClient | null = null;

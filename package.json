@@ -45,7 +45,19 @@
         "title": "Cancel Official Codex Probe",
         "category": "Aiflow"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Aiflow Official Codex",
+      "properties": {
+        "aiflow.officialCodex.realTurnTimeoutMinutes": {
+          "type": "number",
+          "default": 60,
+          "minimum": 3,
+          "maximum": 240,
+          "description": "Maximum duration in minutes for one real Official Codex turn."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "tsc -p .",
