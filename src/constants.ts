@@ -2,8 +2,6 @@ export const OFFICIAL_EXTENSION_ID = "openai.chatgpt";
 export const OFFICIAL_EXTENSION_VERSION = "26.814.41407";
 
 export const CODEX_HOST_ID = "local";
-export const REQUESTED_MODEL = "gpt-5.6-luna";
-export const REQUESTED_REASONING = "low";
 
 export const IPC_METHOD_VERSIONS = {
   initialize: 0,

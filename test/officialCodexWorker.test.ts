@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import {
+  MAX_PROMPT_BYTES,
+  MODEL_ID_BY_ROLE,
   modelIdForRole,
   validateOfficialCodexRunRequest,
   type OfficialCodexRunRequest,
@@ -16,13 +18,13 @@ import {
 import type { IpcSuccessResponse } from "../src/protocol";
 
 test("typed contracts validate requests and map every model role", () => {
-  assert.equal(modelIdForRole("luna"), "gpt-5.6-luna");
-  assert.equal(modelIdForRole("terra"), "gpt-5.6-terra");
-  assert.equal(modelIdForRole("sol"), "gpt-5.6-sol");
+  assert.equal(modelIdForRole("luna"), MODEL_ID_BY_ROLE.luna);
+  assert.equal(modelIdForRole("terra"), MODEL_ID_BY_ROLE.terra);
+  assert.equal(modelIdForRole("sol"), MODEL_ID_BY_ROLE.sol);
 
   assert.doesNotThrow(() =>
     validateOfficialCodexRunRequest({
-      runId: "run-1",
+      runId: "00000000-0000-4000-8000-000000000001",
       workspacePath: "/workspace",
       prompt: "exact prompt",
       modelRole: "terra",
@@ -32,6 +34,16 @@ test("typed contracts validate requests and map every model role", () => {
   assert.throws(
     () => validateOfficialCodexRunRequest({
       runId: "run-1",
+      workspacePath: "/workspace",
+      prompt: "exact prompt",
+      modelRole: "terra",
+      reasoningEffort: "xhigh",
+    }),
+    /valid UUID runId/,
+  );
+  assert.throws(
+    () => validateOfficialCodexRunRequest({
+      runId: "00000000-0000-4000-8000-000000000001",
       workspacePath: "relative",
       prompt: "exact prompt",
       modelRole: "terra",
@@ -41,7 +53,7 @@ test("typed contracts validate requests and map every model role", () => {
   );
   assert.throws(
     () => validateOfficialCodexRunRequest({
-      runId: "run-1",
+      runId: "00000000-0000-4000-8000-000000000001",
       workspacePath: "/workspace",
       prompt: "",
       modelRole: "terra",
@@ -51,7 +63,47 @@ test("typed contracts validate requests and map every model role", () => {
   );
   assert.throws(
     () => validateOfficialCodexRunRequest({
-      runId: "run-1",
+      runId: "00000000-0000-4000-8000-000000000001",
+      workspacePath: "/workspace",
+      prompt: " \n\t ",
+      modelRole: "terra",
+      reasoningEffort: "xhigh",
+    }),
+    /non-empty prompt/,
+  );
+  const asciiAtLimit = "a".repeat(MAX_PROMPT_BYTES);
+  const multibyteAtLimit = "🙂".repeat(MAX_PROMPT_BYTES / 4);
+  assert.doesNotThrow(() => validateOfficialCodexRunRequest({
+    runId: "00000000-0000-4000-8000-000000000001",
+    workspacePath: "/workspace",
+    prompt: asciiAtLimit,
+    modelRole: "terra",
+    reasoningEffort: "xhigh",
+  }));
+  assert.doesNotThrow(() => validateOfficialCodexRunRequest({
+    runId: "00000000-0000-4000-8000-000000000001",
+    workspacePath: "/workspace",
+    prompt: multibyteAtLimit,
+    modelRole: "terra",
+    reasoningEffort: "xhigh",
+  }));
+  assert.throws(() => validateOfficialCodexRunRequest({
+    runId: "00000000-0000-4000-8000-000000000001",
+    workspacePath: "/workspace",
+    prompt: `${asciiAtLimit}a`,
+    modelRole: "terra",
+    reasoningEffort: "xhigh",
+  }), /exceeds/);
+  assert.throws(() => validateOfficialCodexRunRequest({
+    runId: "00000000-0000-4000-8000-000000000001",
+    workspacePath: "/workspace",
+    prompt: `${multibyteAtLimit}🙂`,
+    modelRole: "terra",
+    reasoningEffort: "xhigh",
+  }), /exceeds/);
+  assert.throws(
+    () => validateOfficialCodexRunRequest({
+      runId: "00000000-0000-4000-8000-000000000001",
       workspacePath: "/workspace",
       prompt: "exact prompt",
       modelRole: "unknown",
@@ -64,7 +116,7 @@ test("typed contracts validate requests and map every model role", () => {
 test("worker bootstraps once, sends only the exact prompt through IPC, and returns dynamic settings", async () => {
   await withFixture(async ({ workspace, sessionsRoot, tempRoot, sessionPath }) => {
     const request: OfficialCodexRunRequest = {
-      runId: "run-terra",
+      runId: "00000000-0000-4000-8000-000000000002",
       workspacePath: workspace,
       prompt: "Do exactly this arbitrary task: preserve every character.",
       modelRole: "terra",
@@ -73,10 +125,13 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
     let bootstrapArguments: { instruction: string; nonce: string; temporaryFile: string } | null = null;
     let settingsParams: Record<string, unknown> | null = null;
     let startParams: Record<string, unknown> | null = null;
+    const callOrder: string[] = [];
+    let completedIpc: FakeIpcClient | null = null;
 
     const worker = new OfficialCodexWorker({
       sessionsRoot,
       tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
       now: () => new Date("2026-08-23T18:00:00.000Z"),
       invokeBootstrap: async (arguments_) => {
         bootstrapArguments = arguments_;
@@ -87,7 +142,7 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
           `${[
             sessionMeta("conversation-terra", "/not-used"),
             { type: "arbitrary_record", payload: { nonce: arguments_.nonce } },
-            turnContext("bootstrap", "gpt-5.6-luna", "low", workspace),
+            turnContext("bootstrap", modelIdForRole("luna"), "low", workspace),
             event("task_complete", {
               turn_id: "bootstrap",
               last_agent_message: `AIFLOW_BOOTSTRAP_${arguments_.nonce}`,
@@ -97,16 +152,20 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
             .join("\n")}\n`,
         );
       },
-      createIpcClient: () =>
-        new FakeIpcClient({
+      createIpcClient: () => {
+        completedIpc = new FakeIpcClient({
           onSettings: (params) => {
+            callOrder.push("settings");
             settingsParams = params as Record<string, unknown>;
           },
           onStart: (params) => {
+            callOrder.push("start");
             startParams = params as Record<string, unknown>;
             return appendRealTurn(sessionPath, workspace, request.prompt);
           },
-        }),
+        });
+        return completedIpc;
+      },
     });
 
     const result = await worker.run(request);
@@ -122,16 +181,16 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
     assert.equal(result.outcome, "completed");
     assert.equal(result.finalResponse, "arbitrary final response");
     assert.equal(result.requestedModelRole, "terra");
-    assert.equal(result.requestedModelId, "gpt-5.6-terra");
+    assert.equal(result.requestedModelId, modelIdForRole("terra"));
     assert.equal(result.requestedReasoningEffort, "high");
-    assert.equal(result.recordedModelId, "gpt-5.6-terra");
+    assert.equal(result.recordedModelId, modelIdForRole("terra"));
     assert.equal(result.recordedReasoningEffort, "high");
     assert.equal(result.startedAt, "2026-08-23T18:00:00.000Z");
     assert.equal(result.finishedAt, "2026-08-23T18:00:00.000Z");
     const capturedSettings = settingsParams as unknown as Record<string, unknown>;
     assert.equal(
       (capturedSettings.threadSettings as Record<string, unknown>).model,
-      "gpt-5.6-terra",
+      modelIdForRole("terra"),
     );
     assert.equal(
       (capturedSettings.threadSettings as Record<string, unknown>).effort,
@@ -139,13 +198,15 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
     );
     const turnStartParams = (startParams as unknown as Record<string, unknown>)
       .turnStartParams as Record<string, unknown>;
-    assert.equal(turnStartParams.model, "gpt-5.6-terra");
+    assert.equal(turnStartParams.model, modelIdForRole("terra"));
     assert.equal(turnStartParams.effort, "high");
     assert.equal(
       ((turnStartParams.input as Array<Record<string, unknown>>)[0]).text,
       request.prompt,
     );
     assert.equal(await exists(capturedBootstrap.temporaryFile), false);
+    assert.deepEqual(callOrder, ["settings", "start"]);
+    assert.equal((completedIpc as unknown as FakeIpcClient).disposed, true);
   });
 });
 
@@ -162,6 +223,7 @@ test("worker permits only one active run at a time", async () => {
     const worker = new OfficialCodexWorker({
       sessionsRoot,
       tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
       invokeBootstrap: async (arguments_) => {
         bootstrapStarted();
         await bootstrapReleased;
@@ -170,7 +232,7 @@ test("worker permits only one active run at a time", async () => {
           sessionPath,
           `${[
             { type: "arbitrary", payload: { nonce: arguments_.nonce } },
-            turnContext("bootstrap", "gpt-5.6-luna", "low", workspace),
+            turnContext("bootstrap", modelIdForRole("luna"), "low", workspace),
             event("task_complete", {
               turn_id: "bootstrap",
               last_agent_message: `AIFLOW_BOOTSTRAP_${arguments_.nonce}`,
@@ -195,7 +257,7 @@ test("worker permits only one active run at a time", async () => {
     await assert.rejects(worker.run(makeRequest(workspace, "second")), /already active/);
     releaseBootstrap();
     const result = await firstRun;
-    assert.equal(result.runId, "first");
+    assert.equal(result.runId, request.runId);
   });
 });
 
@@ -209,13 +271,14 @@ test("worker cancellation targets the exact known turn and returns cancelled", a
     const worker = new OfficialCodexWorker({
       sessionsRoot,
       tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
       invokeBootstrap: async (arguments_) => {
         await fs.writeFile(
           sessionPath,
           `${[
             sessionMeta("conversation-cancel", workspace),
             { type: "arbitrary", payload: { nonce: arguments_.nonce } },
-            turnContext("bootstrap", "gpt-5.6-luna", "low", workspace),
+            turnContext("bootstrap", modelIdForRole("luna"), "low", workspace),
             event("task_complete", {
               turn_id: "bootstrap",
               last_agent_message: `AIFLOW_BOOTSTRAP_${arguments_.nonce}`,
@@ -254,6 +317,151 @@ test("worker cancellation targets the exact known turn and returns cancelled", a
   });
 });
 
+test("bootstrap failure sends zero real prompts and never opens IPC", async () => {
+  await withFixture(async ({ workspace, sessionsRoot, tempRoot }) => {
+    let ipcCreated = false;
+    const worker = new OfficialCodexWorker({
+      sessionsRoot,
+      tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
+      invokeBootstrap: async () => {
+        throw new Error("bootstrap command failed");
+      },
+      createIpcClient: () => {
+        ipcCreated = true;
+        throw new Error("IPC must not be opened after bootstrap failure");
+      },
+    });
+
+    await assert.rejects(worker.run(makeRequest(workspace, "bootstrap-failure")), /bootstrap command failed/);
+    assert.equal(ipcCreated, false);
+  });
+});
+
+test("failure after start-turn does not replay the real prompt and disposes IPC", async () => {
+  await withFixture(async ({ workspace, sessionsRoot, tempRoot, sessionPath }) => {
+    let starts = 0;
+    let failedIpc: FakeIpcClient | null = null;
+    const worker = new OfficialCodexWorker({
+      sessionsRoot,
+      tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
+      realTurnTimeoutMs: 8,
+      pollIntervalMs: 1,
+      invokeBootstrap: async (arguments_) => {
+        await writeBootstrapSession(sessionPath, workspace, arguments_.nonce);
+      },
+      createIpcClient: () => {
+        failedIpc = new FakeIpcClient({
+          onStart: async (params) => {
+            starts += 1;
+            const prompt = String(
+              ((((params as Record<string, unknown>).turnStartParams as Record<string, unknown>)
+                .input as Array<Record<string, unknown>>)[0]).text,
+            );
+            await appendPendingTurn(sessionPath, workspace, prompt, "missing-terminal");
+            return { turnId: "missing-terminal" };
+          },
+        });
+        return failedIpc;
+      },
+    });
+
+    await assert.rejects(worker.run(makeRequest(workspace, "no-replay")), /Timed out/);
+    assert.equal(starts, 1);
+    assert.equal((failedIpc as unknown as FakeIpcClient).disposed, true);
+  });
+});
+
+test("failed terminal outcome disposes IPC", async () => {
+  await withFixture(async ({ workspace, sessionsRoot, tempRoot, sessionPath }) => {
+    let failedIpc: FakeIpcClient | null = null;
+    const worker = new OfficialCodexWorker({
+      sessionsRoot,
+      tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
+      pollIntervalMs: 1,
+      invokeBootstrap: async (arguments_) => {
+        await writeBootstrapSession(sessionPath, workspace, arguments_.nonce);
+      },
+      createIpcClient: () => {
+        failedIpc = new FakeIpcClient({
+          onStart: async (params) => {
+            const prompt = String(
+              ((((params as Record<string, unknown>).turnStartParams as Record<string, unknown>)
+                .input as Array<Record<string, unknown>>)[0]).text,
+            );
+            await appendFailedTurn(sessionPath, workspace, prompt);
+            return { turnId: "failed-turn" };
+          },
+        });
+        return failedIpc;
+      },
+    });
+
+    const result = await worker.run(makeRequest(workspace, "terminal-failure"));
+    assert.equal(result.outcome, "failed");
+    assert.equal((failedIpc as unknown as FakeIpcClient).disposed, true);
+  });
+});
+
+test("queued and repeated cancellation sends one exact interrupt and disposes IPC", async () => {
+  await withFixture(async ({ workspace, sessionsRoot, tempRoot, sessionPath }) => {
+    let releaseBootstrap!: () => void;
+    const bootstrapReleased = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+    let bootstrapStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bootstrapStarted = resolve; });
+    let interrupts = 0;
+    let signalInterrupt!: () => void;
+    const interruptStarted = new Promise<void>((resolve) => { signalInterrupt = resolve; });
+    let releaseTerminal!: () => void;
+    const terminalReleased = new Promise<void>((resolve) => { releaseTerminal = resolve; });
+    let cancelledIpc: FakeIpcClient | null = null;
+    const worker = new OfficialCodexWorker({
+      sessionsRoot,
+      tempRoot,
+      authorizeWorkspace: async (workspacePath) => workspacePath,
+      pollIntervalMs: 1,
+      invokeBootstrap: async (arguments_) => {
+        bootstrapStarted();
+        await bootstrapReleased;
+        await writeBootstrapSession(sessionPath, workspace, arguments_.nonce);
+      },
+      createIpcClient: () => {
+        cancelledIpc = new FakeIpcClient({
+          onStart: async (params) => {
+            const prompt = String(
+              ((((params as Record<string, unknown>).turnStartParams as Record<string, unknown>)
+                .input as Array<Record<string, unknown>>)[0]).text,
+            );
+            await appendPendingTurn(sessionPath, workspace, prompt);
+            return { turnId: "cancel-turn" };
+          },
+          onInterrupt: () => {
+            interrupts += 1;
+            signalInterrupt();
+            return terminalReleased.then(() => appendTerminal(sessionPath, "cancel-turn", "turn_aborted"));
+          },
+        });
+        return cancelledIpc;
+      },
+    });
+
+    const run = worker.run(makeRequest(workspace, "queued-cancel"));
+    await started;
+    assert.equal(await worker.cancel(), "queued");
+    releaseBootstrap();
+    await interruptStarted;
+    const repeatedCancellation = Promise.all([worker.cancel(), worker.cancel()]);
+    releaseTerminal();
+    assert.deepEqual(await repeatedCancellation, ["requested", "requested"]);
+    const result = await run;
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(interrupts, 1);
+    assert.equal((cancelledIpc as unknown as FakeIpcClient).disposed, true);
+  });
+});
+
 async function withFixture(
   run: (fixture: {
     workspace: string;
@@ -278,6 +486,7 @@ async function withFixture(
 
 class FakeIpcClient implements OfficialCodexIpcClient {
   private initialized = false;
+  disposed = false;
 
   constructor(
     private readonly callbacks: {
@@ -315,12 +524,15 @@ class FakeIpcClient implements OfficialCodexIpcClient {
 
   dispose(): void {
     this.initialized = false;
+    this.disposed = true;
   }
 }
 
+let requestSequence = 10;
+
 function makeRequest(workspacePath: string, runId: string): OfficialCodexRunRequest {
   return {
-    runId,
+    runId: `00000000-0000-4000-8000-${String(requestSequence++).padStart(12, "0")}`,
     workspacePath,
     prompt: `prompt-${runId}`,
     modelRole: "luna",
@@ -337,7 +549,7 @@ async function appendRealTurn(
     sessionPath,
     `${[
       event("task_started", { turn_id: "real-turn" }),
-      turnContext("real-turn", "gpt-5.6-terra", "high", workspace),
+      turnContext("real-turn", modelIdForRole("terra"), "high", workspace),
       event("user_message", { message: prompt }),
       event("agent_message", { message: "arbitrary final response" }),
       event("task_complete", {
@@ -351,7 +563,46 @@ async function appendRealTurn(
   return { turnId: "real-turn" };
 }
 
+async function writeBootstrapSession(
+  sessionPath: string,
+  workspace: string,
+  nonce: string,
+): Promise<void> {
+  await fs.writeFile(
+    sessionPath,
+    `${[
+      sessionMeta("conversation", workspace),
+      { type: "arbitrary", payload: { nonce } },
+      turnContext("bootstrap", modelIdForRole("luna"), "low", workspace),
+      event("task_complete", {
+        turn_id: "bootstrap",
+        last_agent_message: `AIFLOW_BOOTSTRAP_${nonce}`,
+      }),
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n")}\n`,
+  );
+}
+
 async function appendPendingTurn(
+  sessionPath: string,
+  workspace: string,
+  prompt: string,
+  turnId = "cancel-turn",
+): Promise<void> {
+  await fs.appendFile(
+    sessionPath,
+    `${[
+      event("task_started", { turn_id: turnId }),
+      turnContext(turnId, modelIdForRole("luna"), "low", workspace),
+      event("user_message", { message: prompt }),
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n")}\n`,
+  );
+}
+
+async function appendFailedTurn(
   sessionPath: string,
   workspace: string,
   prompt: string,
@@ -359,9 +610,10 @@ async function appendPendingTurn(
   await fs.appendFile(
     sessionPath,
     `${[
-      event("task_started", { turn_id: "cancel-turn" }),
-      turnContext("cancel-turn", "gpt-5.6-luna", "low", workspace),
+      event("task_started", { turn_id: "failed-turn" }),
+      turnContext("failed-turn", modelIdForRole("luna"), "low", workspace),
       event("user_message", { message: prompt }),
+      event("task_failed", { turn_id: "failed-turn" }),
     ]
       .map((record) => JSON.stringify(record))
       .join("\n")}\n`,

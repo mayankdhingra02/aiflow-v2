@@ -23,6 +23,7 @@ import {
   turnIdFromStartResponse,
   withTemporaryBootstrapFile,
 } from "../src/probeProtocol";
+import { modelIdForRole } from "../src/officialCodexContracts";
 import type { IpcSuccessResponse } from "../src/protocol";
 
 test("extension version gate accepts only the pinned official extension version", () => {
@@ -50,13 +51,14 @@ test("bootstrap instruction has only nonce probe constraints and exact marker", 
 });
 
 test("model and reasoning map to confirmed settings and start-turn fields", () => {
-  const settings = buildThreadSettingsParams("conversation");
+  const modelId = modelIdForRole("luna");
+  const settings = buildThreadSettingsParams("conversation", modelId, "low");
   const realPrompt = buildRealPrompt("nonce");
-  const start = buildStartTurnParams("conversation", realPrompt, "message-id");
+  const start = buildStartTurnParams("conversation", realPrompt, modelId, "low", "message-id");
 
   assert.deepEqual(settings, {
     conversationId: "conversation",
-    threadSettings: { model: "gpt-5.6-luna", effort: "low" },
+    threadSettings: { model: modelId, effort: "low" },
   });
   assert.deepEqual(start, {
     conversationId: "conversation",
@@ -64,7 +66,7 @@ test("model and reasoning map to confirmed settings and start-turn fields", () =
       input: [{ type: "text", text: realPrompt, text_elements: [] }],
       clientUserMessageId: "message-id",
       additionalContext: null,
-      model: "gpt-5.6-luna",
+      model: modelId,
       effort: "low",
     },
     localTurnMetadata: null,

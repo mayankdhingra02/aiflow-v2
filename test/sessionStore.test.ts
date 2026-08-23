@@ -15,6 +15,7 @@ import {
   waitForExactTurn,
   type SessionBoundary,
 } from "../src/sessionStore";
+import { modelIdForRole } from "../src/officialCodexContracts";
 
 test("session snapshot comparison returns only identities created afterward", async () => {
   await withSessionRoot(async (root) => {
@@ -172,7 +173,7 @@ test("completed known turn correlates the exact prompt after the boundary", () =
     event("user_message", { message: "an unrelated prompt" }),
     event("task_complete", { turn_id: unrelated, last_agent_message: "unrelated" }),
     event("task_started", { turn_id: real }),
-    turnContext(real, "gpt-5.6-luna", "low"),
+    turnContext(real, modelIdForRole("luna"), "low"),
     event("user_message", { message: prompt }),
     event("agent_message", { message: "AIFLOW_ACCEPT_nonce", phase: "final_answer" }),
     event("task_complete", { turn_id: real, last_agent_message: "AIFLOW_ACCEPT_nonce" }),
@@ -184,7 +185,7 @@ test("completed known turn correlates the exact prompt after the boundary", () =
     promptCorrelated: true,
     outcome: "completed",
     finalResponse: "AIFLOW_ACCEPT_nonce",
-    recordedModel: "gpt-5.6-luna",
+    recordedModel: modelIdForRole("luna"),
     recordedReasoning: "low",
   });
 });

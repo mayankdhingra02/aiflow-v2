@@ -1,7 +1,7 @@
 {
   "name": "aiflow-official-codex-probe",
-  "displayName": "Aiflow Official Codex Probe",
-  "description": "Version-gated feasibility probe for the official Codex VS Code extension.",
+  "displayName": "Aiflow Official Codex Worker",
+  "description": "Version-gated reusable worker for the official Codex VS Code extension.",
   "version": "0.0.1",
   "private": true,
   "publisher": "local-aiflow",
@@ -12,12 +12,23 @@
     "Other"
   ],
   "activationEvents": [
+    "onCommand:aiflow.runOfficialCodex",
+    "onCommand:aiflow.runClipboardOfficialCodex",
+    "onCommand:aiflow.cancelActiveOfficialCodexRun",
     "onCommand:aiflow.runOfficialCodexProbe",
     "onCommand:aiflow.cancelOfficialCodexProbe"
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "aiflow.runClipboardOfficialCodex",
+        "title": "Aiflow: Run Clipboard Prompt Through Official Codex"
+      },
+      {
+        "command": "aiflow.cancelActiveOfficialCodexRun",
+        "title": "Aiflow: Cancel Active Official Codex Run"
+      },
       {
         "command": "aiflow.runOfficialCodexProbe",
         "title": "Run Official Codex Probe",

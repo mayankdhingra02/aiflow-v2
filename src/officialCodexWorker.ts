@@ -8,7 +8,6 @@ import {
   type ProbeIpcMethod,
 } from "./constants";
 import {
-  canonicalWorkspacePath,
   modelIdForRole,
   validateOfficialCodexRunRequest,
   type OfficialCodexRunRequest,
@@ -68,6 +67,7 @@ export interface BootstrapInvokerArguments {
 export interface OfficialCodexWorkerOptions {
   sessionsRoot: string;
   tempRoot: string;
+  authorizeWorkspace: (workspacePath: string) => Promise<string>;
   socketPath?: string;
   invokeBootstrap: (arguments_: BootstrapInvokerArguments) => Promise<void>;
   createIpcClient?: (options: {
@@ -110,7 +110,7 @@ export class OfficialCodexWorker {
 
     try {
       validateOfficialCodexRunRequest(request);
-      const workspacePath = await canonicalWorkspacePath(request.workspacePath);
+      const workspacePath = await this.options.authorizeWorkspace(request.workspacePath);
       const startedAt = this.timestamp();
       const active: ActiveRun = {
         request: { ...request, workspacePath },
@@ -237,7 +237,6 @@ export class OfficialCodexWorker {
       buildStartTurnParams(
         bootstrap.conversationId,
         request.prompt,
-        undefined,
         requestedModelId,
         request.reasoningEffort,
       ),

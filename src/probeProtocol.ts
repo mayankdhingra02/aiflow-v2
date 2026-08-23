@@ -4,8 +4,6 @@ import * as path from "node:path";
 
 import {
   CODEX_HOST_ID,
-  REQUESTED_MODEL,
-  REQUESTED_REASONING,
 } from "./constants";
 import { asRecord } from "./ipcClient";
 import type { IpcSuccessResponse } from "./protocol";
@@ -59,8 +57,8 @@ export function ownerClientIdFrom(response: IpcSuccessResponse): string {
 
 export function buildThreadSettingsParams(
   conversationId: string,
-  modelId: string = REQUESTED_MODEL,
-  reasoningEffort: string = REQUESTED_REASONING,
+  modelId: string,
+  reasoningEffort: string,
 ): Record<string, unknown> {
   return {
     conversationId,
@@ -81,9 +79,9 @@ export function requireSettingsSuccess(response: IpcSuccessResponse): void {
 export function buildStartTurnParams(
   conversationId: string,
   exactPrompt: string,
+  modelId: string,
+  reasoningEffort: string,
   clientUserMessageId: string = randomUUID(),
-  modelId: string = REQUESTED_MODEL,
-  reasoningEffort: string = REQUESTED_REASONING,
 ): Record<string, unknown> {
   return {
     conversationId,

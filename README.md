@@ -1,27 +1,67 @@
 # Aiflow reusable official Codex worker
 
-This repository contains a minimal VS Code companion-extension worker. It is pinned to the locally inspected official extension:
+Phase 1 live acceptance passed for the pinned official VS Code extension. Phase 2 turns that
+accepted bootstrap and exact-turn correlation into one app-lifetime worker and execution service.
+
+The integration is pinned to:
 
 - Extension ID: `openai.chatgpt`
 - Exact supported version: `26.814.41407`
-- Supported model roles: `luna`, `terra`, `sol`
-- Supported reasoning effort: `low`, `medium`, `high`, `xhigh`
+- Model roles: `luna`, `terra`, `sol`
+- Reasoning effort: `low`, `medium`, `high`, `xhigh`
 
-The worker does not launch Codex CLI, Codex App Server, or any child process. It invokes the official extension's `chatgpt.implementTodo` command only for a nonce-only bootstrap, then sends the caller's exact prompt through the already-running official extension's private local IPC router.
+The worker does not launch Codex CLI or a separate App Server. It uses the already-running
+official extension: `chatgpt.implementTodo` is used only for a fresh nonce-only bootstrap, and
+the exact requested prompt is sent only through the follower IPC path.
 
-Because this is a private, version-specific protocol probe, any other official-extension version is rejected before a model turn is started.
+## Shared architecture
 
-## Setup
+Every surface uses one `OfficialCodexExecutionService`, which owns one `OfficialCodexWorker`.
+Before a bootstrap it requires exactly one local workspace folder, canonicalizes both workspace
+paths and requires equality, activates the official extension, and enforces the exact version.
+The worker then performs bootstrap, applies model/reasoning settings, starts one exact turn,
+watches only the correlated session, and supports exact-turn cancellation.
 
-Requirements:
+Available commands:
 
-- VS Code 1.96.2 or newer
-- Node.js 22 or newer for local development
-- Official `openai.chatgpt` extension version exactly `26.814.41407`
-- A signed-in and working official Codex extension
-- Exactly one local workspace folder open
+- `aiflow.runOfficialCodex` — internal programmatic command; not shown in the Command Palette.
+- `aiflow.runClipboardOfficialCodex` — visible clipboard workflow.
+- `aiflow.cancelActiveOfficialCodexRun` — cancels the active exact turn.
+- `aiflow.runOfficialCodexProbe` and `aiflow.cancelOfficialCodexProbe` — preserved Phase 1
+  compatibility surfaces, routed through the same service and worker.
 
-Install and validate:
+Programmatic callers provide:
+
+```ts
+interface OfficialCodexRunRequest {
+  runId: string; // UUID
+  workspacePath: string; // absolute, canonical path matching the sole open workspace
+  prompt: string; // exact input, non-blank, at most 128 KiB UTF-8
+  modelRole: "luna" | "terra" | "sol";
+  reasoningEffort: "low" | "medium" | "high" | "xhigh";
+}
+```
+
+The result contract is:
+
+```ts
+interface OfficialCodexRunResult {
+  runId: string;
+  conversationId: string;
+  turnId: string;
+  outcome: "completed" | "failed" | "cancelled";
+  finalResponse: string;
+  requestedModelRole: "luna" | "terra" | "sol";
+  requestedModelId: string;
+  requestedReasoningEffort: "low" | "medium" | "high" | "xhigh";
+  recordedModelId: string | null;
+  recordedReasoningEffort: string | null;
+  startedAt: string;
+  finishedAt: string;
+}
+```
+
+## Local validation
 
 ```sh
 cd /Users/mayankdhingra/Desktop/aiflow-v2
@@ -30,55 +70,47 @@ npm run compile
 npm test
 ```
 
-These automated tests use local fixtures and injected or mocked IPC sockets. They do not run
-the live probe and do not send a real Codex model turn.
+Automated tests use local session fixtures and injected mocks for VS Code, clipboard, UI, the
+shared service, and IPC. They do not import a live VS Code runtime, connect to Codex IPC, run the
+live probe, or send a real model turn.
 
-## Manual F5 acceptance test
+## Phase 2 live acceptance procedure
 
-1. In a terminal, create a disposable Git repository outside this source workspace. Create it
-   from the terminal only; do not open it in a separate normal VS Code window:
+Do not run this procedure from automated tests. In a terminal, create a clean disposable Git
+repository outside this source workspace and commit its initial README:
 
-   ```sh
-   probe_dir="$(mktemp -d /tmp/aiflow-official-probe.XXXXXX)"
-   git -C "$probe_dir" init
-   printf 'probe workspace\n' > "$probe_dir/README.txt"
-   printf 'Disposable repository: %s\n' "$probe_dir"
-   ```
+```sh
+probe_dir="$(mktemp -d /tmp/aiflow-phase2.XXXXXX)"
+git -C "$probe_dir" init
+printf 'phase 2 acceptance workspace\n' > "$probe_dir/README.txt"
+git -C "$probe_dir" add README.txt
+git -C "$probe_dir" commit -m 'Initialize acceptance workspace'
+printf 'Disposable repository: %s\n' "$probe_dir"
+```
 
-2. In this repository's VS Code window, confirm the Extensions view reports `openai.chatgpt` version `26.814.41407`.
-3. Press `F5` from the `aiflow-v2` window and select **Run Aiflow Probe Extension**.
-4. Open the disposable repository for the first time only inside the Extension Development Host:
-   use **File → Open Folder…**, enter the path printed in `probe_dir`, and ensure it is the only
-   workspace folder.
-5. Open the Command Palette and run **Aiflow: Run Official Codex Probe**.
-6. Open **View → Output** and select **Aiflow Official Codex Probe**.
-7. Within the bounded two-minute windows, require output containing:
+From the `aiflow-v2` VS Code window, confirm `openai.chatgpt` is exactly version `26.814.41407`,
+press `F5`, and open the disposable repository only in the Extension Development Host. It must be
+the only workspace folder.
 
-   ```text
-   extension version: 26.814.41407
-   conversation ID: <non-empty>
-   bootstrap turn ID: <non-empty>
-   real turn ID: <non-empty>
-   requested model: gpt-5.6-luna
-   requested reasoning: low
-   terminal outcome: completed
-   final response: AIFLOW_PHASE2_ACCEPTANCE.
-   probe state: completed
-   ```
+Copy this exact prompt to the clipboard:
 
-8. Confirm `git -C "$probe_dir" status --short` has no changes other than the intentionally untracked `README.txt` created before the probe.
-9. Run the probe again and immediately run **Aiflow: Cancel Official Codex Probe**. The output must either say cancellation is queued until the exact real turn is known or confirm the exact real turn ID. The eventual terminal outcome must be `cancelled`; it must not stop any other Codex conversation.
+```text
+Create phase2-proof.txt with bytes exactly equal to: phase 2 verified
+Modify no other file.
+```
 
-## Confirmed private IPC contract
+Run **Aiflow: Run Clipboard Prompt Through Official Codex**. Select a model role and reasoning
+effort, confirm the modal details (workspace, resolved model ID, reasoning, and UTF-8 prompt byte
+count), and explicitly choose **Run**. In the Aiflow output require a run ID, workspace, selected
+role and model ID, reasoning, conversation ID, turn ID, recorded settings, completed outcome, and
+timestamps. Verify:
 
-Messages use a four-byte little-endian payload length followed by UTF-8 JSON on `~/.codex/ipc/ipc.sock`.
+```sh
+printf 'phase 2 verified' | cmp -s - "$probe_dir/phase2-proof.txt"
+git -C "$probe_dir" status --short
+```
 
-| Method | Version | Request parameters | Successful result |
-| --- | ---: | --- | --- |
-| `initialize` | 0 | `{clientType:"vscode"}` | `{clientId}` |
-| `thread-owner-discovery` | 1 | `{hostId:"local",conversationId}` | top-level `handledByClientId`, result `{}` |
-| `thread-follower-update-thread-settings` | 1 | `{conversationId,threadSettings:{model,effort}}` | `{ok:true}` |
-| `thread-follower-start-turn` | 1 | `{conversationId,turnStartParams,localTurnMetadata,mcpAppModelContextAttachments}` | `{result:{turn:{id}}}` when provided |
-| `thread-follower-interrupt-turn` | 4 | `{conversationId,mode:"user-stop",expectedTurnId}` | `{ok:true,interruptedTurnId}` |
-
-These shapes were confirmed against the installed `openai.chatgpt@26.814.41407` bundle and must not be treated as stable across versions.
+The file must have bytes exactly `phase 2 verified` and status must show only
+`?? phase2-proof.txt`. Run a second clipboard request and immediately run
+**Aiflow: Cancel Active Official Codex Run**. The output must report a queued or confirmed exact
+turn cancellation; it must not affect another conversation.
