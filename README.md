@@ -1,13 +1,13 @@
-# Aiflow official Codex feasibility probe
+# Aiflow reusable official Codex worker
 
-This repository contains only a minimal VS Code companion-extension probe. It is pinned to the locally inspected official extension:
+This repository contains a minimal VS Code companion-extension worker. It is pinned to the locally inspected official extension:
 
 - Extension ID: `openai.chatgpt`
 - Exact supported version: `26.814.41407`
-- Model: `gpt-5.6-luna`
-- Reasoning effort: `low`
+- Supported model roles: `luna`, `terra`, `sol`
+- Supported reasoning effort: `low`, `medium`, `high`, `xhigh`
 
-The probe does not launch Codex CLI, Codex App Server, or any child process. It invokes the official extension's `chatgpt.implementTodo` command once with a nonce-only bootstrap instruction, then communicates with the already-running official extension through its private local IPC router.
+The worker does not launch Codex CLI, Codex App Server, or any child process. It invokes the official extension's `chatgpt.implementTodo` command only for a nonce-only bootstrap, then sends the caller's exact prompt through the already-running official extension's private local IPC router.
 
 Because this is a private, version-specific protocol probe, any other official-extension version is rejected before a model turn is started.
 
@@ -62,7 +62,7 @@ the live probe and do not send a real Codex model turn.
    requested model: gpt-5.6-luna
    requested reasoning: low
    terminal outcome: completed
-   final response: AIFLOW_ACCEPT_<nonce>
+   final response: AIFLOW_PHASE2_ACCEPTANCE.
    probe state: completed
    ```
 

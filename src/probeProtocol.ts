@@ -57,12 +57,16 @@ export function ownerClientIdFrom(response: IpcSuccessResponse): string {
   return response.handledByClientId;
 }
 
-export function buildThreadSettingsParams(conversationId: string): Record<string, unknown> {
+export function buildThreadSettingsParams(
+  conversationId: string,
+  modelId: string = REQUESTED_MODEL,
+  reasoningEffort: string = REQUESTED_REASONING,
+): Record<string, unknown> {
   return {
     conversationId,
     threadSettings: {
-      model: REQUESTED_MODEL,
-      effort: REQUESTED_REASONING,
+      model: modelId,
+      effort: reasoningEffort,
     },
   };
 }
@@ -78,6 +82,8 @@ export function buildStartTurnParams(
   conversationId: string,
   exactPrompt: string,
   clientUserMessageId: string = randomUUID(),
+  modelId: string = REQUESTED_MODEL,
+  reasoningEffort: string = REQUESTED_REASONING,
 ): Record<string, unknown> {
   return {
     conversationId,
@@ -91,8 +97,8 @@ export function buildStartTurnParams(
       ],
       clientUserMessageId,
       additionalContext: null,
-      model: REQUESTED_MODEL,
-      effort: REQUESTED_REASONING,
+      model: modelId,
+      effort: reasoningEffort,
     },
     localTurnMetadata: null,
     mcpAppModelContextAttachments: [],
