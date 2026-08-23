@@ -84,6 +84,12 @@ After the worker reaches a terminal outcome, Aiflow independently reads the bran
 after the base (at most 100), worktree status, upstream identity, and the exact remote branch SHA via
 read-only `git ls-remote`. A remote-tracking ref is never used as the sole push proof.
 
+Remote proof is the final gate. Aiflow first classifies completed runs from local evidence in the
+documented order (repository, branch, ancestry, commits, cleanliness, and immutable upstream). It
+skips `git ls-remote` whenever one of those deterministic statuses is already known. Consequently, a
+remote timeout or malformed response can produce `git_inspection_failed` only after every local gate
+has passed; it can never replace a higher-precedence delivery status.
+
 The preflight upstream target is immutable for the run: its remote name, upstream ref, and derived
 `refs/heads/...` branch ref are retained separately. Postflight checks the currently configured
 upstream only for integrity; it never redirects verification to a new upstream. Changing or removing

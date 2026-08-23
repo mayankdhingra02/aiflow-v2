@@ -56,12 +56,34 @@ export class GitImplementationService {
         throw gitImplementationError(error, "GIT_EXECUTION_FAILED", "Official Codex execution failed");
       }
       try {
-        const inspection = await this.git.inspectAfterRun(workspacePath, preflight);
+        if (codex.outcome !== "completed") {
+          return {
+            runId: request.runId,
+            deliveryStatus: "codex_not_completed",
+            codex,
+            git: unavailableEvidence(preflight),
+          };
+        }
+        const localInspection = await this.git.inspectLocalAfterRun(workspacePath, preflight);
+        if (localInspection.deliveryStatus) {
+          return {
+            runId: request.runId,
+            deliveryStatus: localInspection.deliveryStatus,
+            codex,
+            git: localInspection.evidence,
+          };
+        }
+        const remoteHeadSha = await this.git.verifyRemoteHead(workspacePath, preflight);
+        const evidence = {
+          ...localInspection.evidence,
+          remoteHeadSha,
+          pushVerified: remoteHeadSha === localInspection.evidence.headSha,
+        };
         return {
           runId: request.runId,
-          deliveryStatus: deliveryStatus(codex.outcome, request, preflight, inspection.evidence, inspection.baseIsAncestor, inspection.upstreamUnchanged),
+          deliveryStatus: evidence.pushVerified ? "verified" : "push_not_verified",
           codex,
-          git: inspection.evidence,
+          git: evidence,
         };
       } catch {
         return {

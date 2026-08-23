@@ -126,9 +126,52 @@ test("preflight upstream target remains authoritative when Codex changes, remove
     const runner = new FixtureGitRunner(mutation);
     const result = await makeGitService(new FakeOfficial(), runner).run(requestFor());
     assert.equal(result.deliveryStatus, "push_not_verified", mutation);
-    assert.deepEqual(runner.lsRemoteArgs, ["ls-remote", "origin", "refs/heads/main"], mutation);
+    assert.equal(runner.lsRemoteCalls, 0, mutation);
     assert.equal(result.git.upstreamRemote, "origin");
     assert.equal(result.git.upstreamRef, "origin/main");
+  }
+});
+
+test("remote verification is skipped for every higher-precedence delivery status", async () => {
+  for (const outcome of ["failed", "cancelled"] as const) {
+    const runner = new FixtureGitRunner("normal", true);
+    const result = await makeGitService(new FakeOfficial(outcome), runner).run(requestFor());
+    assert.equal(result.deliveryStatus, "codex_not_completed", outcome);
+    assert.equal(runner.lsRemoteCalls, 0, outcome);
+  }
+  const cases: Array<[FixtureMutation, string]> = [
+    ["post-repository", "repository_mismatch"],
+    ["post-branch", "branch_changed"],
+    ["post-detached", "branch_changed"],
+    ["rewritten", "history_rewritten"],
+    ["no-commit", "no_commit"],
+    ["post-dirty", "working_tree_dirty"],
+    ["upstream-branch", "push_not_verified"],
+    ["upstream-removed", "push_not_verified"],
+  ];
+  for (const [mutation, expected] of cases) {
+    const runner = new FixtureGitRunner(mutation, true);
+    const result = await makeGitService(new FakeOfficial(), runner).run(requestFor());
+    assert.equal(result.deliveryStatus, expected, mutation);
+    assert.equal(result.git.remoteHeadSha, null, mutation);
+    assert.equal(result.git.pushVerified, false, mutation);
+    assert.equal(runner.lsRemoteCalls, 0, mutation);
+  }
+});
+
+test("remote proof runs exactly once only after local gates pass", async () => {
+  const verifiedRunner = new FixtureGitRunner();
+  assert.equal((await makeGitService(new FakeOfficial(), verifiedRunner).run(requestFor())).deliveryStatus, "verified");
+  assert.equal(verifiedRunner.lsRemoteCalls, 1);
+  for (const mutation of ["remote-empty", "remote-mismatch"] as const) {
+    const runner = new FixtureGitRunner(mutation);
+    assert.equal((await makeGitService(new FakeOfficial(), runner).run(requestFor())).deliveryStatus, "push_not_verified");
+    assert.equal(runner.lsRemoteCalls, 1);
+  }
+  for (const mutation of ["timeout", "remote-malformed-sha", "remote-wrong-ref", "remote-duplicate"] as const) {
+    const runner = new FixtureGitRunner(mutation);
+    assert.equal((await makeGitService(new FakeOfficial(), runner).run(requestFor())).deliveryStatus, "git_inspection_failed");
+    assert.equal(runner.lsRemoteCalls, 1);
   }
 });
 
@@ -245,14 +288,14 @@ type FixtureMutation = "normal" | "dirty" | "detached" | "branch" | "branch-slas
 class FixtureGitRunner implements GitRunner {
   private preflightComplete = false;
   lsRemoteArgs: string[] | undefined;
+  lsRemoteCalls = 0;
   upstreamArgs: string[] | undefined;
   revListCalls = 0;
-  constructor(private readonly mutation: FixtureMutation = "normal") {}
+  constructor(private readonly mutation: FixtureMutation = "normal", private readonly failOnLsRemote = false) {}
 
   async run(_cwd: string, args: readonly string[]): Promise<string> {
     const command = args.join(" ");
     const post = this.preflightComplete;
-    if (this.mutation === "timeout" && post && command.startsWith("ls-remote")) throw new Error("timed out https://secret@github.com/owner/repository.git");
     if (command === "rev-parse --show-toplevel") return `${WORKSPACE}\n`;
     if (command.startsWith("status")) return this.mutation === "dirty" || (post && this.mutation === "post-dirty") ? "?? untracked\n" : "";
     if (command === "branch --show-current") {
@@ -284,6 +327,9 @@ class FixtureGitRunner implements GitRunner {
     if (command.startsWith("rev-list")) { this.revListCalls += 1; return this.mutation === "no-commit" ? "" : `${HEAD}\n`; }
     if (command.startsWith("ls-remote")) {
       this.lsRemoteArgs = [...args];
+      this.lsRemoteCalls += 1;
+      if (this.failOnLsRemote) throw new Error("remote verification should not run");
+      if (this.mutation === "timeout" && post) throw new Error("timed out https://secret@github.com/owner/repository.git");
       if (this.mutation === "remote-empty") return "";
       if (this.mutation === "remote-malformed-sha") return `not-a-sha\trefs/heads/main\n`;
       if (this.mutation === "remote-wrong-ref") return `${HEAD}\trefs/heads/other\n`;

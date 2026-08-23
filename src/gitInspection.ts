@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import {
   GitImplementationError,
   repositoryIdentityEquals,
+  type GitDeliveryStatus,
   type GitDeliveryEvidence,
   type GitImplementationRunRequest,
 } from "./gitImplementationContracts";
@@ -65,10 +66,9 @@ export interface GitPreflight {
   remoteBranchRef: string;
 }
 
-export interface GitPostflightInspection {
+export interface GitLocalPostflightInspection {
   evidence: GitDeliveryEvidence;
-  baseIsAncestor: boolean;
-  upstreamUnchanged: boolean;
+  deliveryStatus: Exclude<GitDeliveryStatus, "verified" | "codex_not_completed" | "git_inspection_failed"> | null;
 }
 
 export class GitInspection {
@@ -118,44 +118,52 @@ export class GitInspection {
     }
   }
 
-  async inspectAfterRun(workspacePath: string, preflight: GitPreflight): Promise<GitPostflightInspection> {
+  async inspectLocalAfterRun(workspacePath: string, preflight: GitPreflight): Promise<GitLocalPostflightInspection> {
     try {
-      const branch = await this.currentBranch(workspacePath);
-      const headSha = await this.currentHead(workspacePath);
-      const workingTreeClean = await this.isClean(workspacePath);
-      const currentUpstream = branch ? await this.currentUpstream(workspacePath, branch) : null;
-      const upstreamUnchanged = currentUpstream?.remote === preflight.upstreamRemote && currentUpstream.ref === preflight.upstreamRef;
-
-      // The preflight remote remains the only source of repository identity and remote proof.
+      // Repository identity is the first completed-run gate. This only reads local config.
       const originalRemoteExists = await this.remoteExists(workspacePath, preflight.upstreamRemote);
       const repository = originalRemoteExists
         ? (await this.repositoryForRemote(workspacePath, preflight.upstreamRemote)) ?? ""
         : preflight.repository;
+      let evidence = localEvidence(preflight, { githubRepository: repository });
+      if (!repositoryIdentityEquals(repository, preflight.repository)) {
+        return { evidence, deliveryStatus: "repository_mismatch" };
+      }
+
+      const branch = await this.currentBranch(workspacePath);
+      evidence = localEvidence(preflight, { ...evidence, branch: branch ?? "" });
+      if (branch !== preflight.branch) {
+        return { evidence, deliveryStatus: "branch_changed" };
+      }
+
+      const headSha = await this.currentHead(workspacePath);
+      evidence = localEvidence(preflight, { ...evidence, headSha });
 
       // Check ancestry before rev-list so replacement history cannot become an overflow error.
       const baseIsAncestor = await this.baseIsAncestor(workspacePath, preflight.baseSha, headSha);
-      const commitShas = baseIsAncestor ? await this.commitsAfterBase(workspacePath, preflight.baseSha) : [];
-      const remoteHeadSha = originalRemoteExists
-        ? await this.strictRemoteHead(workspacePath, preflight.upstreamRemote, preflight.remoteBranchRef)
-        : null;
-      const pushVerified = upstreamUnchanged && remoteHeadSha === headSha;
+      if (!baseIsAncestor) return { evidence, deliveryStatus: "history_rewritten" };
 
-      return {
-        evidence: {
-          githubRepository: repository,
-          branch: branch ?? "",
-          baseSha: preflight.baseSha,
-          headSha,
-          commitShas,
-          workingTreeClean,
-          upstreamRemote: preflight.upstreamRemote,
-          upstreamRef: preflight.upstreamRef,
-          remoteHeadSha,
-          pushVerified,
-        },
-        baseIsAncestor,
-        upstreamUnchanged,
-      };
+      const commitShas = await this.commitsAfterBase(workspacePath, preflight.baseSha);
+      evidence = localEvidence(preflight, { ...evidence, commitShas });
+      if (commitShas.length === 0) return { evidence, deliveryStatus: "no_commit" };
+
+      const workingTreeClean = await this.isClean(workspacePath);
+      evidence = localEvidence(preflight, { ...evidence, workingTreeClean });
+      if (!workingTreeClean) return { evidence, deliveryStatus: "working_tree_dirty" };
+
+      const currentUpstream = await this.currentUpstream(workspacePath, branch);
+      const upstreamUnchanged = currentUpstream?.remote === preflight.upstreamRemote && currentUpstream.ref === preflight.upstreamRef;
+      if (!upstreamUnchanged || !originalRemoteExists) return { evidence, deliveryStatus: "push_not_verified" };
+
+      return { evidence, deliveryStatus: null };
+    } catch (error) {
+      throw asWorkflowError(error, "GIT_INSPECTION_FAILED", "Git inspection failed");
+    }
+  }
+
+  async verifyRemoteHead(workspacePath: string, preflight: GitPreflight): Promise<string | null> {
+    try {
+      return await this.strictRemoteHead(workspacePath, preflight.upstreamRemote, preflight.remoteBranchRef);
     } catch (error) {
       throw asWorkflowError(error, "GIT_INSPECTION_FAILED", "Git inspection failed");
     }
@@ -258,6 +266,22 @@ function remoteRefForUpstream(upstreamRef: string, remote: string): string | nul
   const branch = upstreamRef.slice(remote.length + 1);
   const result = `refs/heads/${branch}`;
   return isSafeRemoteBranchRef(result) ? result : null;
+}
+function localEvidence(preflight: GitPreflight, partial: Partial<GitDeliveryEvidence> = {}): GitDeliveryEvidence {
+  const { remoteHeadSha: _remoteHeadSha, pushVerified: _pushVerified, ...localPartial } = partial;
+  return {
+    githubRepository: preflight.repository,
+    branch: preflight.branch,
+    baseSha: preflight.baseSha,
+    headSha: "",
+    commitShas: [],
+    workingTreeClean: false,
+    upstreamRemote: preflight.upstreamRemote,
+    upstreamRef: preflight.upstreamRef,
+    remoteHeadSha: null,
+    pushVerified: false,
+    ...localPartial,
+  };
 }
 function line(value: string): string { return value.trim().split(/\r?\n/, 1)[0] ?? ""; }
 function lines(value: string): string[] { return value.trim() === "" ? [] : value.trim().split(/\r?\n/).map((item) => item.trim()); }
