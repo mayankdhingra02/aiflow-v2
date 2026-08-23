@@ -30,20 +30,26 @@ npm run compile
 npm test
 ```
 
+These automated tests use local fixtures and injected or mocked IPC sockets. They do not run
+the live probe and do not send a real Codex model turn.
+
 ## Manual F5 acceptance test
 
-1. In a terminal, create a disposable Git repository outside this source workspace:
+1. In a terminal, create a disposable Git repository outside this source workspace. Create it
+   from the terminal only; do not open it in a separate normal VS Code window:
 
    ```sh
    probe_dir="$(mktemp -d /tmp/aiflow-official-probe.XXXXXX)"
    git -C "$probe_dir" init
    printf 'probe workspace\n' > "$probe_dir/README.txt"
-   code -n "$probe_dir"
+   printf 'Disposable repository: %s\n' "$probe_dir"
    ```
 
 2. In this repository's VS Code window, confirm the Extensions view reports `openai.chatgpt` version `26.814.41407`.
-3. Press `F5` and select **Run Aiflow Probe Extension**.
-4. In the Extension Development Host, use **File → Open Folder…** and open the disposable repository from step 1. Ensure it is the only workspace folder.
+3. Press `F5` from the `aiflow-v2` window and select **Run Aiflow Probe Extension**.
+4. Open the disposable repository for the first time only inside the Extension Development Host:
+   use **File → Open Folder…**, enter the path printed in `probe_dir`, and ensure it is the only
+   workspace folder.
 5. Open the Command Palette and run **Aiflow: Run Official Codex Probe**.
 6. Open **View → Output** and select **Aiflow Official Codex Probe**.
 7. Within the bounded two-minute windows, require output containing:

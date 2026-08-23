@@ -55,10 +55,12 @@ interface BootstrapInspection {
   turnId: string | null;
   outcome: TerminalOutcome | null;
   finalResponse: string | null;
+  validationError: string | null;
 }
 
 interface TurnInspection {
   turnId: string | null;
+  turnObserved: boolean;
   promptCorrelated: boolean;
   outcome: TerminalOutcome | null;
   finalResponse: string | null;
@@ -100,7 +102,11 @@ export async function findBootstrapMatches(
 
   for (const sessionPath of candidates) {
     const parsed = await readSession(sessionPath);
-    const inspection = inspectBootstrapRecords(parsed.records, nonce);
+    const inspection = inspectBootstrapRecords(
+      parsed.records,
+      nonce,
+      `AIFLOW_BOOTSTRAP_${nonce}`,
+    );
     if (inspection.containsNonce) {
       matches.push({ sessionPath, inspection });
     }
@@ -129,27 +135,29 @@ export async function waitForBootstrapSession(options: {
       throw new Error("Multiple newly created Codex sessions contain the bootstrap nonce");
     }
     if (matches.length === 1) {
-      const [{ sessionPath, inspection }] = matches;
-      if (!inspection.conversationId || !inspection.recordedCwd || !inspection.turnId) {
+      const [{ sessionPath }] = matches;
+      const validated = inspectBootstrapRecords(
+        (await readSession(sessionPath)).records,
+        options.nonce,
+        options.expectedMarker,
+      );
+      if (validated.validationError) {
+        throw new Error(validated.validationError);
+      }
+      if (!validated.conversationId || !validated.recordedCwd || !validated.turnId) {
         await delay(options.pollIntervalMs ?? SESSION_POLL_INTERVAL_MS);
         continue;
       }
-      if (!(await canonicalPathsEqual(inspection.recordedCwd, options.canonicalWorkspace))) {
+      if (!(await canonicalPathsEqual(validated.recordedCwd, options.canonicalWorkspace))) {
         throw new Error("Bootstrap session cwd does not match the open workspace");
       }
-      if (inspection.outcome === "failed" || inspection.outcome === "cancelled") {
-        throw new Error(`Bootstrap turn ended with outcome ${inspection.outcome}`);
-      }
-      if (inspection.outcome === "completed") {
-        if (inspection.finalResponse !== options.expectedMarker) {
-          throw new Error("Bootstrap response did not equal the requested marker");
-        }
+      if (validated.outcome === "completed") {
         return {
           sessionPath,
-          conversationId: inspection.conversationId,
-          bootstrapTurnId: inspection.turnId,
-          recordedCwd: inspection.recordedCwd,
-          finalResponse: inspection.finalResponse,
+          conversationId: validated.conversationId,
+          bootstrapTurnId: validated.turnId,
+          recordedCwd: validated.recordedCwd,
+          finalResponse: validated.finalResponse ?? "",
         };
       }
     }
@@ -197,7 +205,7 @@ export async function waitForExactTurn(options: {
       emittedTurnId = inspection.turnId;
       await options.onTurnId?.(inspection.turnId);
     }
-    if (inspection.turnId && inspection.promptCorrelated && inspection.outcome) {
+    if (inspection.turnId && inspection.turnObserved && inspection.outcome) {
       return {
         conversationId: options.conversationId,
         turnId: inspection.turnId,
@@ -210,63 +218,94 @@ export async function waitForExactTurn(options: {
 
     await delay(options.pollIntervalMs ?? SESSION_POLL_INTERVAL_MS);
   }
-  throw new Error("Timed out waiting for the exact real Codex turn");
+  throw new Error(
+    options.knownTurnId
+      ? "Timed out waiting for the known real Codex turn after the session boundary"
+      : "Timed out without one unique exact-prompt turn after the session boundary",
+  );
 }
 
 export function inspectBootstrapRecords(
   records: Record<string, unknown>[],
   nonce: string,
+  expectedMarker: string = `AIFLOW_BOOTSTRAP_${nonce}`,
 ): BootstrapInspection {
-  let activeTurnId: string | null = null;
-  let nonceTurnId: string | null = null;
-  let containsNonce = false;
-  const terminals = new Map<string, { outcome: TerminalOutcome; finalResponse: string | null }>();
-  const agentMessages = new Map<string, string>();
-
-  for (const record of records) {
+  const containsNonce = records.some((record) => recordContainsString(record, nonce));
+  const markerCompletions = records.filter((record) => {
     const payload = recordPayload(record);
-    const payloadType = stringField(payload, "type");
-    const turnId = stringField(payload, "turn_id");
+    return (
+      record.type === "event_msg" &&
+      payload.type === "task_complete" &&
+      payload.last_agent_message === expectedMarker
+    );
+  });
 
-    if (record.type === "event_msg" && payloadType === "task_started" && turnId) {
-      activeTurnId = turnId;
-    } else if (record.type === "turn_context" && turnId) {
-      activeTurnId = turnId;
-    }
+  let validationError: string | null = null;
+  if (markerCompletions.length > 1) {
+    validationError ??= "Bootstrap session contains duplicate exact marker completions";
+  }
 
-    const userText = extractUserText(record, payload);
-    if (userText?.includes(nonce)) {
-      containsNonce = true;
-      if (activeTurnId) {
-        if (nonceTurnId && nonceTurnId !== activeTurnId) {
-          throw new Error("Bootstrap nonce appeared in more than one turn in one session");
-        }
-        nonceTurnId = activeTurnId;
-      }
-    }
+  const markerPayload = markerCompletions.length === 1
+    ? recordPayload(markerCompletions[0])
+    : null;
+  const turnId = markerPayload ? stringField(markerPayload, "turn_id") : null;
+  if (markerPayload && !turnId) {
+    validationError ??= "Bootstrap exact marker completion is missing its turn ID";
+  }
 
-    const agentText = extractAgentText(record, payload);
-    if (agentText !== null && activeTurnId) {
-      agentMessages.set(activeTurnId, agentText);
-    }
+  const sessionMetas = records.filter((record) => record.type === "session_meta");
+  if (sessionMetas.length > 1) {
+    validationError ??= "Bootstrap session contains duplicate session_meta evidence";
+  }
+  const metaPayload = sessionMetas.length === 1 ? recordPayload(sessionMetas[0]) : null;
+  const metaId = metaPayload ? stringField(metaPayload, "id") : null;
+  const metaSessionId = metaPayload ? stringField(metaPayload, "session_id") : null;
+  if (metaId && metaSessionId && metaId !== metaSessionId) {
+    validationError ??= "Bootstrap session_meta contains conflicting conversation IDs";
+  }
+  const conversationId = metaId ?? metaSessionId;
+  if (sessionMetas.length === 1 && !conversationId) {
+    validationError ??= "Bootstrap session_meta is missing the conversation ID";
+  }
 
-    if (turnId) {
-      const terminal = terminalFromEvent(payloadType, payload);
-      if (terminal) {
-        terminals.set(turnId, terminal);
-      }
+  const matchingContexts = turnId
+    ? records.filter(
+        (record) =>
+          record.type === "turn_context" &&
+          stringField(recordPayload(record), "turn_id") === turnId,
+      )
+    : [];
+  if (matchingContexts.length > 1) {
+    validationError ??= "Bootstrap turn contains duplicate turn_context evidence";
+  }
+  const recordedCwd = matchingContexts.length === 1
+    ? stringField(recordPayload(matchingContexts[0]), "cwd")
+    : null;
+  if (matchingContexts.length === 1 && !recordedCwd) {
+    validationError ??= "Bootstrap turn_context is missing cwd";
+  }
+
+  if (turnId) {
+    const turnTerminals = records.filter((record) => {
+      const payload = recordPayload(record);
+      return (
+        stringField(payload, "turn_id") === turnId &&
+        terminalFromEvent(stringField(payload, "type"), payload) !== null
+      );
+    });
+    if (turnTerminals.length > 1) {
+      validationError ??= "Bootstrap turn contains conflicting or duplicate terminal evidence";
     }
   }
 
-  const terminal = nonceTurnId ? terminals.get(nonceTurnId) : undefined;
   return {
     containsNonce,
-    conversationId: sessionConversationId(records),
-    recordedCwd: sessionCwd(records),
-    turnId: nonceTurnId,
-    outcome: terminal?.outcome ?? null,
-    finalResponse:
-      terminal?.finalResponse ?? (nonceTurnId ? agentMessages.get(nonceTurnId) ?? null : null),
+    conversationId,
+    recordedCwd,
+    turnId,
+    outcome: markerPayload && turnId ? "completed" : null,
+    finalResponse: markerPayload && turnId ? expectedMarker : null,
+    validationError,
   };
 }
 
@@ -282,6 +321,8 @@ export function inspectTurnRecords(
 
   let activeTurnId: string | null = null;
   const promptTurnIds = new Set<string>();
+  let unscopedExactPrompt = false;
+  const observedTurnIds = new Set<string>();
   const terminals = new Map<string, { outcome: TerminalOutcome; finalResponse: string | null }>();
   const agentMessages = new Map<string, string>();
   const contexts = new Map<string, { model: string | null; effort: string | null }>();
@@ -290,6 +331,9 @@ export function inspectTurnRecords(
     const payload = recordPayload(record);
     const payloadType = stringField(payload, "type");
     const turnId = stringField(payload, "turn_id");
+    if (turnId) {
+      observedTurnIds.add(turnId);
+    }
 
     if (record.type === "event_msg" && payloadType === "task_started" && turnId) {
       activeTurnId = turnId;
@@ -301,14 +345,19 @@ export function inspectTurnRecords(
       });
     }
 
+    const recordTurnId = turnId ?? activeTurnId;
     const userText = extractUserText(record, payload);
-    if (userText === exactPrompt && activeTurnId) {
-      promptTurnIds.add(activeTurnId);
+    if (userText === exactPrompt) {
+      if (recordTurnId) {
+        promptTurnIds.add(recordTurnId);
+      } else {
+        unscopedExactPrompt = true;
+      }
     }
 
     const agentText = extractAgentText(record, payload);
-    if (agentText !== null && activeTurnId) {
-      agentMessages.set(activeTurnId, agentText);
+    if (agentText !== null && recordTurnId) {
+      agentMessages.set(recordTurnId, agentText);
     }
 
     if (turnId) {
@@ -322,6 +371,9 @@ export function inspectTurnRecords(
   if (promptTurnIds.size > 1) {
     throw new Error("The exact real prompt appeared in multiple new turns");
   }
+  if (unscopedExactPrompt) {
+    throw new Error("The exact real prompt appeared without turn-scoped evidence");
+  }
   const promptTurnId = promptTurnIds.values().next().value as string | undefined;
   if (knownTurnId && promptTurnId && knownTurnId !== promptTurnId) {
     throw new Error("Follower response turn ID does not match the prompt-correlated turn ID");
@@ -332,6 +384,7 @@ export function inspectTurnRecords(
   const context = turnId ? contexts.get(turnId) : undefined;
   return {
     turnId,
+    turnObserved: turnId !== null && observedTurnIds.has(turnId),
     promptCorrelated: turnId !== null && promptTurnIds.has(turnId),
     outcome: terminal?.outcome ?? null,
     finalResponse:
@@ -429,15 +482,6 @@ function sessionConversationId(records: Record<string, unknown>[]): string | nul
   return null;
 }
 
-function sessionCwd(records: Record<string, unknown>[]): string | null {
-  for (const record of records) {
-    if (record.type === "session_meta") {
-      return stringField(recordPayload(record), "cwd");
-    }
-  }
-  return null;
-}
-
 function allTurnIds(records: Record<string, unknown>[]): string[] {
   const result = new Set<string>();
   for (const record of records) {
@@ -504,13 +548,21 @@ function terminalFromEvent(
       finalResponse: stringField(payload, "last_agent_message"),
     };
   }
-  if (payloadType === "turn_aborted") {
+  if (payloadType === "turn_aborted" || payloadType === "task_interrupted") {
     return { outcome: "cancelled", finalResponse: null };
   }
-  if (payloadType === "task_failed" || payloadType === "turn_failed") {
+  if (
+    payloadType === "task_failed" ||
+    payloadType === "turn_failed" ||
+    payloadType === "error"
+  ) {
     return { outcome: "failed", finalResponse: null };
   }
   return null;
+}
+
+function recordContainsString(record: Record<string, unknown>, expected: string): boolean {
+  return JSON.stringify(record).includes(expected);
 }
 
 function recordPayload(record: Record<string, unknown>): Record<string, unknown> {

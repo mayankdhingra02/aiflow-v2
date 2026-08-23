@@ -102,7 +102,7 @@ export class ProbeController implements vscode.Disposable {
       const expectedBootstrapMarker = bootstrapMarker(nonce);
       const tempRoot = path.join(this.extensionContext.globalStorageUri.fsPath, "probe-temp");
       this.state(active, "invoking nonce-only bootstrap");
-      await withTemporaryBootstrapFile({
+      const bootstrap = await withTemporaryBootstrapFile({
         tempRoot,
         canonicalWorkspace,
         run: async (temporaryFile) => {
@@ -112,16 +112,16 @@ export class ProbeController implements vscode.Disposable {
             line: 1,
             comment: buildBootstrapInstruction(nonce),
           });
-        },
-      });
 
-      this.state(active, "waiting for correlated bootstrap completion");
-      const bootstrap = await waitForBootstrapSession({
-        sessionsRoot,
-        snapshot,
-        nonce,
-        expectedMarker: expectedBootstrapMarker,
-        canonicalWorkspace,
+          this.state(active, "waiting for correlated bootstrap completion");
+          return waitForBootstrapSession({
+            sessionsRoot,
+            snapshot,
+            nonce,
+            expectedMarker: expectedBootstrapMarker,
+            canonicalWorkspace,
+          });
+        },
       });
       active.conversationId = bootstrap.conversationId;
       this.output.appendLine(`conversation ID: ${bootstrap.conversationId}`);

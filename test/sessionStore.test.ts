@@ -8,9 +8,11 @@ import {
   canonicalPathsEqual,
   findBootstrapMatches,
   findNewSessionPaths,
+  inspectBootstrapRecords,
   inspectTurnRecords,
   snapshotSessions,
   waitForBootstrapSession,
+  waitForExactTurn,
   type SessionBoundary,
 } from "../src/sessionStore";
 
@@ -78,7 +80,79 @@ test("canonical workspace verification resolves symbolic links", async () => {
   }
 });
 
-test("turn inspection correlates exact prompt and turn after the boundary", () => {
+test("bootstrap correlation finds the nonce anywhere and uses exact terminal evidence", async () => {
+  await withSessionRoot(async (root) => {
+    const snapshot = await snapshotSessions(root);
+    const nonce = "nonce-in-arbitrary-record";
+    const turnId = "bootstrap-turn";
+    await writeSession(root, "bootstrap.jsonl", [
+      sessionMeta("conversation", "/deliberately-not-the-workspace"),
+      { type: "arbitrary_record", payload: { nested: { probe_nonce: nonce } } },
+      turnContext(turnId, "bootstrap-model", "medium", root),
+      event("task_complete", {
+        turn_id: turnId,
+        last_agent_message: `AIFLOW_BOOTSTRAP_${nonce}`,
+      }),
+    ]);
+
+    const result = await waitForBootstrapSession({
+      sessionsRoot: root,
+      snapshot,
+      nonce,
+      expectedMarker: `AIFLOW_BOOTSTRAP_${nonce}`,
+      canonicalWorkspace: root,
+      timeoutMs: 100,
+      pollIntervalMs: 1,
+    });
+    assert.equal(result.conversationId, "conversation");
+    assert.equal(result.bootstrapTurnId, turnId);
+    assert.equal(result.recordedCwd, root);
+  });
+});
+
+test("bootstrap inspection rejects duplicate and conflicting exact evidence", () => {
+  const nonce = "nonce";
+  const marker = "AIFLOW_BOOTSTRAP_nonce";
+  const base = [
+    sessionMeta("conversation", "/workspace"),
+    { type: "arbitrary", payload: { nonce } },
+    turnContext("turn", "model", "effort", "/workspace"),
+    event("task_complete", { turn_id: "turn", last_agent_message: marker }),
+  ];
+
+  assert.match(
+    inspectBootstrapRecords(
+      [...base, event("task_complete", { turn_id: "turn", last_agent_message: marker })],
+      nonce,
+      marker,
+    ).validationError ?? "",
+    /duplicate exact marker completions/,
+  );
+  assert.match(
+    inspectBootstrapRecords(
+      [...base, event("turn_failed", { turn_id: "turn" })],
+      nonce,
+      marker,
+    ).validationError ?? "",
+    /conflicting or duplicate terminal evidence/,
+  );
+  assert.match(
+    inspectBootstrapRecords(
+      [
+        ...base.slice(1),
+        {
+          type: "session_meta",
+          payload: { id: "one", session_id: "two" },
+        },
+      ],
+      nonce,
+      marker,
+    ).validationError ?? "",
+    /conflicting conversation IDs/,
+  );
+});
+
+test("completed known turn correlates the exact prompt after the boundary", () => {
   const bootstrap = "bootstrap-turn";
   const real = "real-turn";
   const unrelated = "unrelated-turn";
@@ -106,16 +180,47 @@ test("turn inspection correlates exact prompt and turn after the boundary", () =
 
   assert.deepEqual(inspectTurnRecords(records, boundary, prompt, real), {
     turnId: real,
+    turnObserved: true,
     promptCorrelated: true,
     outcome: "completed",
     finalResponse: "AIFLOW_ACCEPT_nonce",
     recordedModel: "gpt-5.6-luna",
     recordedReasoning: "low",
   });
+});
+
+test("known turn ID rejects a prompt correlated to a different new turn", () => {
+  const prompt = "exact prompt";
+  const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+  const records = [
+    sessionMeta("conversation", "/workspace"),
+    event("task_started", { turn_id: "prompt-turn" }),
+    event("user_message", { message: prompt }),
+    event("task_complete", { turn_id: "known-turn", last_agent_message: "done" }),
+  ];
+
   assert.throws(
-    () => inspectTurnRecords(records, boundary, prompt, unrelated),
+    () => inspectTurnRecords(records, boundary, prompt, "known-turn"),
     /does not match the prompt-correlated turn ID/,
   );
+});
+
+test("known turn accepts immediate cancellation without a persisted user message", () => {
+  const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+  const records = [
+    sessionMeta("conversation", "/workspace"),
+    event("turn_aborted", { turn_id: "real-turn" }),
+  ];
+
+  assert.deepEqual(inspectTurnRecords(records, boundary, "exact prompt", "real-turn"), {
+    turnId: "real-turn",
+    turnObserved: true,
+    promptCorrelated: false,
+    outcome: "cancelled",
+    finalResponse: null,
+    recordedModel: null,
+    recordedReasoning: null,
+  });
 });
 
 test("turn inspection rejects a response turn ID that predates the boundary", () => {
@@ -129,6 +234,86 @@ test("turn inspection rejects a response turn ID that predates the boundary", ()
     /existed before/,
   );
 });
+
+test("fallback turn inference uses the unique exact prompt after the boundary", () => {
+  const prompt = "exact prompt";
+  const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+  const records = [
+    sessionMeta("conversation", "/workspace"),
+    event("task_started", { turn_id: "inferred-turn" }),
+    event("user_message", { message: prompt }),
+    event("task_complete", { turn_id: "inferred-turn", last_agent_message: "done" }),
+  ];
+
+  const inspection = inspectTurnRecords(records, boundary, prompt, null);
+  assert.equal(inspection.turnId, "inferred-turn");
+  assert.equal(inspection.promptCorrelated, true);
+  assert.equal(inspection.outcome, "completed");
+});
+
+test("fallback turn inference rejects multiple exact-prompt candidates", () => {
+  const prompt = "exact prompt";
+  const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+  const records = [
+    sessionMeta("conversation", "/workspace"),
+    event("task_started", { turn_id: "one" }),
+    event("user_message", { message: prompt }),
+    event("task_started", { turn_id: "two" }),
+    event("user_message", { message: prompt }),
+  ];
+
+  assert.throws(
+    () => inspectTurnRecords(records, boundary, prompt, null),
+    /multiple new turns/,
+  );
+});
+
+test("fallback turn inference rejects zero prompt candidates after timeout", async () => {
+  await withSessionRoot(async (root) => {
+    const sessionPath = await writeSession(root, "real-turn.jsonl", [
+      sessionMeta("conversation", root),
+    ]);
+    await assert.rejects(
+      waitForExactTurn({
+        sessionPath,
+        conversationId: "conversation",
+        boundary: { recordCount: 1, turnIds: new Set() },
+        exactPrompt: "missing prompt",
+        knownTurnId: null,
+        timeoutMs: 5,
+        pollIntervalMs: 1,
+      }),
+      /without one unique exact-prompt turn/,
+    );
+  });
+});
+
+const terminalCases: Array<[string, "completed" | "cancelled" | "failed"]> = [
+  ["task_complete", "completed"],
+  ["turn_aborted", "cancelled"],
+  ["task_interrupted", "cancelled"],
+  ["task_failed", "failed"],
+  ["turn_failed", "failed"],
+  ["error", "failed"],
+];
+
+for (const [terminalType, expectedOutcome] of terminalCases) {
+  test(`turn inspection recognizes turn-scoped ${terminalType}`, () => {
+    const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+    const fields = terminalType === "task_complete"
+      ? { turn_id: "target", last_agent_message: "done" }
+      : { turn_id: "target" };
+    const records = [
+      sessionMeta("conversation", "/workspace"),
+      event(terminalType, fields),
+      event("task_failed", { turn_id: "other" }),
+    ];
+
+    const inspection = inspectTurnRecords(records, boundary, "prompt not persisted", "target");
+    assert.equal(inspection.outcome, expectedOutcome);
+    assert.equal(inspection.turnId, "target");
+  });
+}
 
 async function withSessionRoot(run: (root: string) => Promise<void>): Promise<void> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "aiflow-session-test-"));
@@ -156,7 +341,7 @@ function bootstrapRecords(conversationId: string, nonce: string): Record<string,
   return [
     sessionMeta(conversationId, "/workspace"),
     event("task_started", { turn_id: turnId }),
-    turnContext(turnId, "bootstrap-model", "medium"),
+    turnContext(turnId, "bootstrap-model", "medium", "/workspace"),
     event("user_message", { message: `wrapper containing ${nonce}` }),
     event("task_complete", {
       turn_id: turnId,
@@ -172,10 +357,15 @@ function sessionMeta(conversationId: string, cwd: string): Record<string, unknow
   };
 }
 
-function turnContext(turnId: string, model: string, effort: string): Record<string, unknown> {
+function turnContext(
+  turnId: string,
+  model: string,
+  effort: string,
+  cwd?: string,
+): Record<string, unknown> {
   return {
     type: "turn_context",
-    payload: { turn_id: turnId, model, effort },
+    payload: { turn_id: turnId, model, effort, ...(cwd ? { cwd } : {}) },
   };
 }
 

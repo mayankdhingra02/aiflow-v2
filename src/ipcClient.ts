@@ -23,10 +23,11 @@ export interface IpcClientOptions {
   socketPath: string;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
+  createConnection?: (socketPath: string) => net.Socket;
 }
 
 export class CodexIpcClient {
-  private readonly decoder = new FrameDecoder();
+  private decoder = new FrameDecoder();
   private readonly correlator = new RequestCorrelator();
   private socket: net.Socket | null = null;
   private clientId = INITIALIZING_CLIENT_ID;
@@ -38,49 +39,89 @@ export class CodexIpcClient {
     if (this.disposed) {
       throw new Error("IPC client is disposed");
     }
-    if (this.socket?.writable) {
+    if (this.socket?.writable && this.clientId !== INITIALIZING_CLIENT_ID) {
       return;
     }
 
     const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const candidate = net.createConnection(this.options.socketPath);
+      let candidate: net.Socket;
+      try {
+        candidate = (this.options.createConnection ?? net.createConnection)(
+          this.options.socketPath,
+        );
+      } catch (error) {
+        reject(
+          new Error(`Unable to connect to Codex IPC socket: ${boundedErrorMessage(error)}`),
+        );
+        return;
+      }
       const timer = setTimeout(() => {
         candidate.destroy();
         reject(new Error("Timed out connecting to Codex IPC socket"));
       }, this.options.connectTimeoutMs ?? IPC_CONNECT_TIMEOUT_MS);
 
-      candidate.once("connect", () => {
+      const onConnect = (): void => {
         clearTimeout(timer);
+        candidate.removeListener("error", onError);
         resolve(candidate);
-      });
-      candidate.once("error", (error) => {
+      };
+      const onError = (error: Error): void => {
         clearTimeout(timer);
+        candidate.removeListener("connect", onConnect);
+        candidate.destroy();
         reject(new Error(`Unable to connect to Codex IPC socket: ${boundedErrorMessage(error)}`));
-      });
+      };
+      candidate.once("connect", onConnect);
+      candidate.once("error", onError);
     });
 
     this.socket = socket;
-    socket.on("data", (chunk: Buffer) => this.handleData(chunk));
+    socket.on("data", (chunk: Buffer) => {
+      if (this.socket === socket) {
+        this.handleData(chunk);
+      }
+    });
     socket.on("error", (error) => {
+      if (this.socket !== socket) {
+        return;
+      }
+      this.socket = null;
+      this.clientId = INITIALIZING_CLIENT_ID;
+      this.decoder = new FrameDecoder();
       this.correlator.rejectAll(
         new Error(`Codex IPC socket error: ${boundedErrorMessage(error)}`),
       );
     });
     socket.on("close", () => {
+      if (this.socket !== socket) {
+        return;
+      }
       this.socket = null;
+      this.clientId = INITIALIZING_CLIENT_ID;
+      this.decoder = new FrameDecoder();
       this.correlator.rejectAll(new Error("Codex IPC socket closed"));
     });
 
-    const initialized = await this.request(
-      "initialize",
-      { clientType: "vscode" },
-      { sourceClientId: INITIALIZING_CLIENT_ID },
-    );
-    const result = asRecord(initialized.result);
-    if (typeof result.clientId !== "string" || result.clientId.length === 0) {
-      throw new Error("Codex IPC initialize response did not contain clientId");
+    try {
+      const initialized = await this.request(
+        "initialize",
+        { clientType: "vscode" },
+        { sourceClientId: INITIALIZING_CLIENT_ID },
+      );
+      const result = asRecord(initialized.result);
+      if (typeof result.clientId !== "string" || result.clientId.length === 0) {
+        throw new Error("Codex IPC initialize response did not contain clientId");
+      }
+      this.clientId = result.clientId;
+    } catch (error) {
+      if (this.socket === socket) {
+        this.socket = null;
+      }
+      this.clientId = INITIALIZING_CLIENT_ID;
+      this.decoder = new FrameDecoder();
+      socket.destroy();
+      throw error;
     }
-    this.clientId = result.clientId;
   }
 
   async request(
@@ -139,6 +180,8 @@ export class CodexIpcClient {
     this.correlator.rejectAll(new Error("Codex IPC client disposed"));
     this.socket?.destroy();
     this.socket = null;
+    this.clientId = INITIALIZING_CLIENT_ID;
+    this.decoder = new FrameDecoder();
   }
 
   private handleData(chunk: Buffer): void {

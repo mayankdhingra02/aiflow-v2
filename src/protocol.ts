@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { ipcVersionFor, type ProbeIpcMethod } from "./constants";
 
-export const MAX_IPC_FRAME_BYTES = 256 * 1024 * 1024;
+export const MAX_IPC_FRAME_BYTES = 8 * 1024 * 1024;
 export const INITIALIZING_CLIENT_ID = "initializing-client";
 
 export interface IpcRequest {
@@ -99,6 +99,9 @@ export class FrameDecoder {
 
     while (this.buffered.byteLength >= 4) {
       const payloadLength = this.buffered.readUInt32LE(0);
+      if (payloadLength === 0) {
+        throw new Error("IPC frame declares a zero-length payload");
+      }
       if (payloadLength > MAX_IPC_FRAME_BYTES) {
         throw new Error(`IPC frame declares ${payloadLength} bytes`);
       }

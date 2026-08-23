@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   FrameDecoder,
+  MAX_IPC_FRAME_BYTES,
   RequestCorrelator,
   createRequest,
   encodeFrame,
@@ -35,6 +36,29 @@ test("frame decoder handles combined frames", () => {
   const decoded = new FrameDecoder().push(Buffer.concat([encodeFrame(first), encodeFrame(second)]));
 
   assert.deepEqual(decoded, [first, second]);
+});
+
+test("IPC frame limit is 8 MiB and oversized encoding is rejected", () => {
+  assert.equal(MAX_IPC_FRAME_BYTES, 8 * 1024 * 1024);
+  assert.throws(
+    () => encodeFrame({ payload: "x".repeat(MAX_IPC_FRAME_BYTES) }),
+    /exceeds/,
+  );
+});
+
+test("frame decoder rejects zero-length frames", () => {
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(0, 0);
+  assert.throws(() => new FrameDecoder().push(header), /zero-length/);
+});
+
+test("frame decoder rejects oversized declarations before receiving payload", () => {
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(MAX_IPC_FRAME_BYTES + 1, 0);
+  assert.throws(
+    () => new FrameDecoder().push(header),
+    new RegExp(`declares ${MAX_IPC_FRAME_BYTES + 1} bytes`),
+  );
 });
 
 test("request correlator resolves responses by request ID even out of order", async () => {

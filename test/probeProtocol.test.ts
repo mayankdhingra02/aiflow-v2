@@ -144,6 +144,45 @@ test("temporary bootstrap file is exclusive, mode 0600, and always removed", asy
   }
 });
 
+test("temporary bootstrap file remains until bootstrap completion dependency settles", async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "aiflow-temp-lifetime-test-"));
+  const workspace = path.join(base, "workspace");
+  const tempRoot = path.join(base, "storage");
+  await fs.mkdir(workspace);
+  let observedPath = "";
+  let releaseCompletion!: () => void;
+  let signalPending!: () => void;
+  const completion = new Promise<void>((resolve) => {
+    releaseCompletion = resolve;
+  });
+  const pending = new Promise<void>((resolve) => {
+    signalPending = resolve;
+  });
+
+  try {
+    const operation = withTemporaryBootstrapFile({
+      tempRoot,
+      canonicalWorkspace: await fs.realpath(workspace),
+      run: async (filePath) => {
+        observedPath = filePath;
+        signalPending();
+        await completion;
+        await fs.stat(filePath);
+        return "validated";
+      },
+    });
+
+    await pending;
+    assert.equal((await fs.stat(observedPath)).isFile(), true);
+    releaseCompletion();
+    assert.equal(await operation, "validated");
+    await assert.rejects(fs.stat(observedPath), { code: "ENOENT" });
+  } finally {
+    releaseCompletion();
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
 function successResponse(result: unknown): IpcSuccessResponse {
   return {
     type: "response",
