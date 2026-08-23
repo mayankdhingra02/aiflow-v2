@@ -14,7 +14,9 @@ export const IPC_METHOD_VERSIONS = {
 export const IPC_REQUEST_TIMEOUT_MS = 5_000;
 export const IPC_CONNECT_TIMEOUT_MS = 5_000;
 export const BOOTSTRAP_TIMEOUT_MS = 120_000;
-export const REAL_TURN_TIMEOUT_MS = 120_000;
+// The accepted Phase 3 implementation run completed after roughly 142 seconds.
+// Leave margin for the same supported exact-turn record shape without replaying a prompt.
+export const REAL_TURN_TIMEOUT_MS = 180_000;
 export const SESSION_POLL_INTERVAL_MS = 500;
 
 export type ProbeIpcMethod = keyof typeof IPC_METHOD_VERSIONS;

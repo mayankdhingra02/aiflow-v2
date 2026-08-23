@@ -244,6 +244,7 @@ export class OfficialCodexWorker {
     );
     active.realTurnId = turnIdFromStartResponse(startResponse);
     if (active.realTurnId) {
+      this.options.log?.(`worker: real turn ID: ${active.realTurnId}`);
       await this.maybeCancel(active);
     }
 
@@ -255,6 +256,18 @@ export class OfficialCodexWorker {
       knownTurnId: active.realTurnId,
       timeoutMs: this.options.realTurnTimeoutMs,
       pollIntervalMs: this.options.pollIntervalMs,
+      sessionsRoot: this.options.sessionsRoot,
+      onTimeoutDiagnostics: (diagnostics) => {
+        this.options.log?.(
+          `watcher timeout: conversation=${diagnostics.conversationId} ` +
+          `turn=${diagnostics.knownTurnId ?? "<none>"} ` +
+          `session=${diagnostics.sessionFilename} ` +
+          `turnObserved=${diagnostics.knownTurnObserved} ` +
+          `promptObserved=${diagnostics.exactPromptObserved} ` +
+          `terminals=${diagnostics.terminalEventTypes.join(",") || "<none>"} ` +
+          `otherCandidate=${diagnostics.anotherSameConversationCandidate}`,
+        );
+      },
       onTurnId: async (turnId) => {
         if (!active.realTurnId) {
           active.realTurnId = turnId;

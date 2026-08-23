@@ -44,6 +44,16 @@ export interface TurnResult {
   recordedReasoning: string | null;
 }
 
+export interface ExactTurnTimeoutDiagnostics {
+  conversationId: string;
+  knownTurnId: string | null;
+  sessionFilename: string;
+  knownTurnObserved: boolean;
+  exactPromptObserved: boolean;
+  terminalEventTypes: string[];
+  anotherSameConversationCandidate: boolean;
+}
+
 interface ParsedSession {
   records: Record<string, unknown>[];
 }
@@ -184,9 +194,12 @@ export async function waitForExactTurn(options: {
   timeoutMs?: number;
   pollIntervalMs?: number;
   onTurnId?: (turnId: string) => void | Promise<void>;
+  sessionsRoot?: string;
+  onTimeoutDiagnostics?: (diagnostics: ExactTurnTimeoutDiagnostics) => void | Promise<void>;
 }): Promise<TurnResult> {
   const deadline = Date.now() + (options.timeoutMs ?? REAL_TURN_TIMEOUT_MS);
   let emittedTurnId: string | null = null;
+  let lastInspection: TurnInspection | null = null;
 
   while (Date.now() < deadline) {
     const parsed = await readSession(options.sessionPath);
@@ -201,6 +214,7 @@ export async function waitForExactTurn(options: {
       options.exactPrompt,
       options.knownTurnId,
     );
+    lastInspection = inspection;
     if (inspection.turnId && inspection.turnId !== emittedTurnId) {
       emittedTurnId = inspection.turnId;
       await options.onTurnId?.(inspection.turnId);
@@ -218,11 +232,74 @@ export async function waitForExactTurn(options: {
 
     await delay(options.pollIntervalMs ?? SESSION_POLL_INTERVAL_MS);
   }
+  const diagnosticTurnId = options.knownTurnId ?? lastInspection?.turnId ?? null;
+  let terminalEventTypes: string[] = [];
+  try {
+    terminalEventTypes = await terminalEventTypesForTurn(
+      options.sessionPath,
+      options.boundary,
+      diagnosticTurnId,
+    );
+  } catch {
+    // Diagnostics must never change the watcher outcome.
+  }
+
+  try {
+    await options.onTimeoutDiagnostics?.({
+      conversationId: options.conversationId,
+      knownTurnId: options.knownTurnId,
+      sessionFilename: path.basename(options.sessionPath),
+      knownTurnObserved: lastInspection?.turnObserved ?? false,
+      exactPromptObserved: lastInspection?.promptCorrelated ?? false,
+      terminalEventTypes,
+      anotherSameConversationCandidate: options.sessionsRoot
+        ? await hasOtherSameConversationCandidate(options.sessionsRoot, options.conversationId, options.sessionPath)
+        : false,
+    });
+  } catch {
+    // Diagnostics must never change the watcher outcome.
+  }
   throw new Error(
     options.knownTurnId
       ? "Timed out waiting for the known real Codex turn after the session boundary"
       : "Timed out without one unique exact-prompt turn after the session boundary",
   );
+}
+
+async function terminalEventTypesForTurn(
+  sessionPath: string,
+  boundary: SessionBoundary,
+  turnId: string | null,
+): Promise<string[]> {
+  if (!turnId) return [];
+  const records = (await readSession(sessionPath)).records.slice(boundary.recordCount);
+  const result = new Set<string>();
+  for (const record of records) {
+    const payload = recordPayload(record);
+    if (stringField(payload, "turn_id") !== turnId) continue;
+    const type = stringField(payload, "type");
+    if (terminalFromEvent(type, payload)) result.add(type ?? "");
+  }
+  return [...result].sort();
+}
+
+async function hasOtherSameConversationCandidate(
+  sessionsRoot: string,
+  conversationId: string,
+  correlatedSessionPath: string,
+): Promise<boolean> {
+  try {
+    const correlatedCanonicalPath = await fs.realpath(correlatedSessionPath);
+    for (const descriptor of await listSessionFiles(sessionsRoot)) {
+      if (descriptor.canonicalPath === correlatedCanonicalPath) continue;
+      if (sessionConversationId((await readSession(descriptor.canonicalPath)).records) === conversationId) {
+        return true;
+      }
+    }
+  } catch {
+    // Diagnostics must not replace the original watcher outcome.
+  }
+  return false;
 }
 
 export function inspectBootstrapRecords(

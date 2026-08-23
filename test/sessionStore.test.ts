@@ -15,6 +15,7 @@ import {
   waitForExactTurn,
   type SessionBoundary,
 } from "../src/sessionStore";
+import { REAL_TURN_TIMEOUT_MS } from "../src/constants";
 import { modelIdForRole } from "../src/officialCodexContracts";
 
 test("session snapshot comparison returns only identities created afterward", async () => {
@@ -190,6 +191,29 @@ test("completed known turn correlates the exact prompt after the boundary", () =
   });
 });
 
+test("sanitized delayed completion fixture uses the observed supported record shape and budget", () => {
+  const prompt = "synthetic implementation prompt";
+  const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
+  const records = [
+    sessionMeta("synthetic-conversation", "/synthetic/workspace"),
+    event("task_started", { turn_id: "synthetic-real-turn" }),
+    turnContext("synthetic-real-turn", modelIdForRole("terra"), "high"),
+    responseUserMessage(prompt),
+    event("agent_message", { message: "synthetic final response" }),
+    event("task_complete", {
+      turn_id: "synthetic-real-turn",
+      last_agent_message: "synthetic final response",
+    }),
+  ];
+
+  const inspection = inspectTurnRecords(records, boundary, prompt, "synthetic-real-turn");
+  assert.equal(inspection.outcome, "completed");
+  assert.equal(inspection.turnObserved, true);
+  assert.equal(inspection.promptCorrelated, true);
+  // The observed production terminal arrived after the old 120-second limit.
+  assert.ok(REAL_TURN_TIMEOUT_MS >= 180_000);
+});
+
 test("known turn ID rejects a prompt correlated to a different new turn", () => {
   const prompt = "exact prompt";
   const boundary: SessionBoundary = { recordCount: 1, turnIds: new Set() };
@@ -289,6 +313,37 @@ test("fallback turn inference rejects zero prompt candidates after timeout", asy
   });
 });
 
+test("timeout diagnostics are bounded and describe only exact-turn correlation state", async () => {
+  await withSessionRoot(async (root) => {
+    const sessionPath = await writeSession(root, "timeout.jsonl", [sessionMeta("conversation", root)]);
+    let diagnostics: import("../src/sessionStore").ExactTurnTimeoutDiagnostics | null = null;
+    await assert.rejects(
+      waitForExactTurn({
+        sessionPath,
+        sessionsRoot: root,
+        conversationId: "conversation",
+        boundary: { recordCount: 1, turnIds: new Set() },
+        exactPrompt: "secret exact prompt must not be logged",
+        knownTurnId: "known-turn",
+        timeoutMs: 5,
+        pollIntervalMs: 1,
+        onTimeoutDiagnostics: (value) => { diagnostics = value; },
+      }),
+      /known real Codex turn/,
+    );
+    assert.deepEqual(diagnostics, {
+      conversationId: "conversation",
+      knownTurnId: "known-turn",
+      sessionFilename: "timeout.jsonl",
+      knownTurnObserved: false,
+      exactPromptObserved: false,
+      terminalEventTypes: [],
+      anotherSameConversationCandidate: false,
+    });
+    assert.equal(JSON.stringify(diagnostics).includes("secret exact prompt"), false);
+  });
+});
+
 const terminalCases: Array<[string, "completed" | "cancelled" | "failed"]> = [
   ["task_complete", "completed"],
   ["turn_aborted", "cancelled"],
@@ -374,5 +429,16 @@ function event(type: string, fields: Record<string, unknown>): Record<string, un
   return {
     type: "event_msg",
     payload: { type, ...fields },
+  };
+}
+
+function responseUserMessage(message: string): Record<string, unknown> {
+  return {
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: message }],
+    },
   };
 }

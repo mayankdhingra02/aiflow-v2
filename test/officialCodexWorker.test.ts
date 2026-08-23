@@ -125,6 +125,7 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
     let bootstrapArguments: { instruction: string; nonce: string; temporaryFile: string } | null = null;
     let settingsParams: Record<string, unknown> | null = null;
     let startParams: Record<string, unknown> | null = null;
+    const logs: string[] = [];
     const callOrder: string[] = [];
     let completedIpc: FakeIpcClient | null = null;
 
@@ -133,6 +134,7 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
       tempRoot,
       authorizeWorkspace: async (workspacePath) => workspacePath,
       now: () => new Date("2026-08-23T18:00:00.000Z"),
+      log: (message) => logs.push(message),
       invokeBootstrap: async (arguments_) => {
         bootstrapArguments = arguments_;
         assert.equal((await fs.stat(arguments_.temporaryFile)).isFile(), true);
@@ -206,6 +208,7 @@ test("worker bootstraps once, sends only the exact prompt through IPC, and retur
     );
     assert.equal(await exists(capturedBootstrap.temporaryFile), false);
     assert.deepEqual(callOrder, ["settings", "start"]);
+    assert.equal(logs.includes("worker: real turn ID: real-turn"), true);
     assert.equal((completedIpc as unknown as FakeIpcClient).disposed, true);
   });
 });
