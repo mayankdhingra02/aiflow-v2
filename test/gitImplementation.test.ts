@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   createImplementationReviewEnvelope,
@@ -16,6 +21,7 @@ import type { OfficialCodexRunResult } from "../src/officialCodexContracts";
 const BASE = "a".repeat(40);
 const HEAD = "b".repeat(40);
 const WORKSPACE = "/workspace";
+const execFileAsync = promisify(execFile);
 
 test("GitHub HTTPS and SSH parsing returns only safe repository identities", () => {
   assert.equal(parseGitHubRepository("https://github.com/Owner/repository.git"), "Owner/repository");
@@ -40,6 +46,50 @@ test("preflight rejects dirty, untracked, detached, branch/base/repository and u
     await assert.rejects(service.run(requestFor()), GitImplementationError);
     assert.equal(official.requests.length, 0, mutation);
   }
+});
+
+test("real local Git discovers a configured branch upstream without contacting its remote", async () => {
+  const repositoryPath = await fs.mkdtemp(path.join(os.tmpdir(), "aiflow-git-inspection-"));
+  try {
+    await git(repositoryPath, ["init", "-b", "main"]);
+    await git(repositoryPath, ["config", "user.email", "test@example.invalid"]);
+    await git(repositoryPath, ["config", "user.name", "Aiflow Test"]);
+    await fs.writeFile(path.join(repositoryPath, "README.txt"), "tracked\n");
+    await git(repositoryPath, ["add", "README.txt"]);
+    await git(repositoryPath, ["commit", "-m", "initial"]);
+    await git(repositoryPath, ["remote", "add", "origin", "https://github.com/Owner/repository.git"]);
+    await git(repositoryPath, ["config", "branch.main.remote", "origin"]);
+    await git(repositoryPath, ["config", "branch.main.merge", "refs/heads/main"]);
+
+    const canonicalRepositoryPath = await fs.realpath(repositoryPath);
+    const snapshot = await new GitInspection().snapshot(canonicalRepositoryPath);
+    assert.deepEqual(snapshot, {
+      repository: "Owner/repository", branch: "main", baseSha: await git(repositoryPath, ["rev-parse", "HEAD"]),
+      upstreamRemote: "origin", upstreamRef: "origin/main", remoteBranchRef: "refs/heads/main",
+    });
+
+    await git(repositoryPath, ["config", "--unset", "branch.main.remote"]);
+    await assert.rejects(new GitInspection().snapshot(canonicalRepositoryPath), (error: unknown) => {
+      assert.ok(error instanceof GitImplementationError);
+      assert.equal((error as GitImplementationError).code, "GIT_PREFLIGHT_FAILED");
+      return true;
+    });
+  } finally {
+    await fs.rm(repositoryPath, { recursive: true, force: true });
+  }
+});
+
+test("upstream discovery queries the exact branch ref, including branch names with slashes", async () => {
+  const runner = new FixtureGitRunner("branch-slash");
+  const request = { ...requestFor(), expectedBranch: "feature/phase3" };
+  const preflight = await new GitInspection(runner, async (value) => value).preflight(WORKSPACE, request);
+  assert.deepEqual(runner.upstreamArgs, [
+    "for-each-ref",
+    "--format=%(upstream:remotename)%09%(upstream:short)",
+    "refs/heads/feature/phase3",
+  ]);
+  assert.equal(preflight.upstreamRef, "origin/feature/phase3");
+  assert.equal(preflight.remoteBranchRef, "refs/heads/feature/phase3");
 });
 
 test("exact implementation prompt is preserved and completed run verifies commit and push", async () => {
@@ -89,6 +139,13 @@ test("detached post-run HEAD and rewritten replacement history fail closed befor
   const rewritten = await makeGitService(new FakeOfficial(), runner).run(requestFor());
   assert.equal(rewritten.deliveryStatus, "history_rewritten");
   assert.equal(runner.revListCalls, 0);
+});
+
+test("divergent and unrelated replacement histories are history_rewritten", async () => {
+  for (const mutation of ["divergent", "orphan"] as const) {
+    const result = await makeGitService(new FakeOfficial(), new FixtureGitRunner(mutation)).run(requestFor());
+    assert.equal(result.deliveryStatus, "history_rewritten", mutation);
+  }
 });
 
 test("ls-remote accepts only one exact full SHA/ref response", async () => {
@@ -183,11 +240,12 @@ test("Git clipboard command uses the shared service, preserves the exact prompt,
   await assert.rejects(controller.runProgrammatic({}), GitImplementationError);
 });
 
-type FixtureMutation = "normal" | "dirty" | "detached" | "branch" | "base" | "repository" | "upstream" | "no-commit" | "rewritten" | "post-branch" | "post-detached" | "post-dirty" | "post-repository" | "upstream-branch" | "upstream-remote" | "upstream-removed" | "remote-mismatch" | "remote-empty" | "remote-malformed-sha" | "remote-wrong-ref" | "remote-duplicate" | "timeout";
+type FixtureMutation = "normal" | "dirty" | "detached" | "branch" | "branch-slash" | "base" | "repository" | "upstream" | "no-commit" | "rewritten" | "divergent" | "orphan" | "post-branch" | "post-detached" | "post-dirty" | "post-repository" | "upstream-branch" | "upstream-remote" | "upstream-removed" | "remote-mismatch" | "remote-empty" | "remote-malformed-sha" | "remote-wrong-ref" | "remote-duplicate" | "timeout";
 
 class FixtureGitRunner implements GitRunner {
   private preflightComplete = false;
   lsRemoteArgs: string[] | undefined;
+  upstreamArgs: string[] | undefined;
   revListCalls = 0;
   constructor(private readonly mutation: FixtureMutation = "normal") {}
 
@@ -199,16 +257,21 @@ class FixtureGitRunner implements GitRunner {
     if (command.startsWith("status")) return this.mutation === "dirty" || (post && this.mutation === "post-dirty") ? "?? untracked\n" : "";
     if (command === "branch --show-current") {
       if (this.mutation === "detached" || (post && this.mutation === "post-detached")) return "";
-      return `${post && this.mutation === "post-branch" ? "other" : this.mutation === "branch" ? "wrong" : "main"}\n`;
+      return `${post && this.mutation === "post-branch" ? "other" : this.mutation === "branch" ? "wrong" : this.mutation === "branch-slash" ? "feature/phase3" : "main"}\n`;
     }
     if (command === "rev-parse HEAD") return `${this.mutation === "base" && !post ? HEAD : post ? HEAD : BASE}\n`;
     if (command.startsWith("rev-parse --verify")) return `${BASE}\n`;
-    if (command === "for-each-ref --format=%(upstream:short) HEAD") {
-      if (this.mutation === "upstream") return "";
-      if (post && this.mutation === "upstream-branch") return "origin/other\n";
-      if (post && this.mutation === "upstream-remote") return "other/main\n";
-      if (post && this.mutation === "upstream-removed") return "";
-      return "origin/main\n";
+    if (args[0] === "for-each-ref") {
+      this.upstreamArgs = [...args];
+      assert.equal(args[2].includes("HEAD"), false);
+      const branchRef = args[2];
+      if (this.mutation === "upstream") return "\t\n";
+      if (post && this.mutation === "upstream-branch") return "origin\torigin/other\n";
+      if (post && this.mutation === "upstream-remote") return "other\tother/main\n";
+      if (post && this.mutation === "upstream-removed") return "\t\n";
+      if (branchRef === "refs/heads/other") return "origin\torigin/other\n";
+      if (branchRef === "refs/heads/feature/phase3") return "origin\torigin/feature/phase3\n";
+      return "origin\torigin/main\n";
     }
     if (command === "remote get-url origin") {
       const result = this.mutation === "repository" ? "https://secret@github.com/other/repo.git\n"
@@ -232,6 +295,11 @@ class FixtureGitRunner implements GitRunner {
       return `${BASE}\n`;
     }
     throw new Error(`unexpected fixed git command: ${command}`);
+  }
+
+  async isAncestor(_cwd: string, _baseSha: string, _headSha: string): Promise<boolean> {
+    if (this.mutation === "rewritten" || this.mutation === "divergent" || this.mutation === "orphan") return false;
+    return true;
   }
 }
 
@@ -291,4 +359,9 @@ function requestFor(prompt = "implement this exactly"): GitImplementationRunRequ
 
 function makeGitService(official: FakeOfficial, runner: GitRunner): GitImplementationService {
   return new GitImplementationService(official, new GitInspection(runner, async (value) => value), async (workspacePath) => workspacePath);
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const result = await execFileAsync("git", args, { cwd, shell: false });
+  return result.stdout.trim();
 }

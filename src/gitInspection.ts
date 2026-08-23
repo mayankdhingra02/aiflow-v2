@@ -18,6 +18,7 @@ const SAFE_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export interface GitRunner {
   run(cwd: string, args: readonly string[]): Promise<string>;
+  isAncestor?(cwd: string, baseSha: string, headSha: string): Promise<boolean>;
 }
 
 export const systemGitRunner: GitRunner = {
@@ -34,6 +35,23 @@ export const systemGitRunner: GitRunner = {
     } catch {
       // Process diagnostics can contain credential-bearing remote URLs; never surface them.
       throw new GitImplementationError("GIT_INSPECTION_FAILED", "Git inspection command failed");
+    }
+  },
+  async isAncestor(cwd, baseSha, headSha) {
+    try {
+      await execFileAsync("git", ["merge-base", "--is-ancestor", baseSha, headSha], {
+        cwd,
+        shell: false,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: MAX_OUTPUT_BYTES,
+        windowsHide: true,
+      });
+      return true;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === 1) {
+        return false;
+      }
+      throw new GitImplementationError("GIT_INSPECTION_FAILED", "Git ancestry inspection failed");
     }
   },
 };
@@ -68,7 +86,7 @@ export class GitInspection {
       const baseSha = await this.currentHead(workspacePath);
       if (baseSha !== request.expectedBaseSha) throw new Error("Current Git HEAD does not match the expected base SHA");
       await this.runner.run(workspacePath, ["rev-parse", "--verify", `${request.expectedBaseSha}^{object}`]);
-      const upstream = await this.currentUpstream(workspacePath);
+      const upstream = await this.currentUpstream(workspacePath, branch);
       if (!upstream) throw new Error("Current Git branch must have an upstream remote branch");
       const remoteBranchRef = remoteRefForUpstream(upstream.ref, upstream.remote);
       if (!remoteBranchRef || !isSafeRemoteName(upstream.remote)) throw new Error("Current Git upstream is invalid");
@@ -88,7 +106,7 @@ export class GitInspection {
       await this.requireClean(workspacePath);
       const branch = await this.currentBranch(workspacePath);
       const baseSha = await this.currentHead(workspacePath);
-      const upstream = await this.currentUpstream(workspacePath);
+      const upstream = branch ? await this.currentUpstream(workspacePath, branch) : null;
       if (!branch || !upstream) throw new Error("Current Git branch must have an upstream remote branch");
       const remoteBranchRef = remoteRefForUpstream(upstream.ref, upstream.remote);
       if (!remoteBranchRef || !isSafeRemoteName(upstream.remote)) throw new Error("Current Git upstream is invalid");
@@ -105,7 +123,7 @@ export class GitInspection {
       const branch = await this.currentBranch(workspacePath);
       const headSha = await this.currentHead(workspacePath);
       const workingTreeClean = await this.isClean(workspacePath);
-      const currentUpstream = await this.currentUpstream(workspacePath);
+      const currentUpstream = branch ? await this.currentUpstream(workspacePath, branch) : null;
       const upstreamUnchanged = currentUpstream?.remote === preflight.upstreamRemote && currentUpstream.ref === preflight.upstreamRef;
 
       // The preflight remote remains the only source of repository identity and remote proof.
@@ -167,13 +185,22 @@ export class GitInspection {
     return head;
   }
 
-  private async currentUpstream(workspacePath: string): Promise<{ remote: string; ref: string } | null> {
-    const ref = line(await this.runner.run(workspacePath, ["for-each-ref", "--format=%(upstream:short)", "HEAD"]));
-    if (ref === "") return null;
+  private async currentUpstream(workspacePath: string, branch: string): Promise<{ remote: string; ref: string } | null> {
+    const output = await this.runner.run(workspacePath, [
+      "for-each-ref",
+      "--format=%(upstream:remotename)%09%(upstream:short)",
+      `refs/heads/${branch}`,
+    ]);
+    const records = exactRecords(output);
+    if (records.length !== 1) throw new Error("Git upstream is malformed");
+    const fields = records[0].split("\t");
+    if (fields.length !== 2) throw new Error("Git upstream is malformed");
+    const [remote, ref] = fields;
+    if (remote === "" && ref === "") return null;
+    if (remote === "" || ref === "") throw new Error("Git upstream is malformed");
     const slash = ref.indexOf("/");
     if (slash <= 0 || slash === ref.length - 1) throw new Error("Git upstream is malformed");
-    const remote = ref.slice(0, slash);
-    if (!isSafeRemoteName(remote) || !remoteRefForUpstream(ref, remote)) throw new Error("Git upstream is malformed");
+    if (ref.slice(0, slash) !== remote || !isSafeRemoteName(remote) || !remoteRefForUpstream(ref, remote)) throw new Error("Git upstream is malformed");
     return { remote, ref };
   }
 
@@ -188,6 +215,8 @@ export class GitInspection {
   }
 
   private async baseIsAncestor(workspacePath: string, baseSha: string, headSha: string): Promise<boolean> {
+    if (baseSha === headSha) return true;
+    if (this.runner.isAncestor) return this.runner.isAncestor(workspacePath, baseSha, headSha);
     const mergeBase = line(await this.runner.run(workspacePath, ["merge-base", baseSha, headSha]));
     if (!FULL_OBJECT_ID.test(mergeBase)) throw new Error("Git merge-base is malformed");
     return mergeBase === baseSha;
@@ -232,6 +261,10 @@ function remoteRefForUpstream(upstreamRef: string, remote: string): string | nul
 }
 function line(value: string): string { return value.trim().split(/\r?\n/, 1)[0] ?? ""; }
 function lines(value: string): string[] { return value.trim() === "" ? [] : value.trim().split(/\r?\n/).map((item) => item.trim()); }
+function exactRecords(value: string): string[] {
+  const withoutFinalNewline = value.replace(/(?:\r?\n)$/, "");
+  return withoutFinalNewline === "" ? [] : withoutFinalNewline.split(/\r?\n/);
+}
 function boundedOutput(value: string): string { return value.length <= MAX_OUTPUT_BYTES ? value : value.slice(0, MAX_OUTPUT_BYTES); }
 function asWorkflowError(error: unknown, code: "GIT_PREFLIGHT_FAILED" | "GIT_INSPECTION_FAILED", message: string): GitImplementationError {
   if (error instanceof GitImplementationError && error.code === code) return error;
