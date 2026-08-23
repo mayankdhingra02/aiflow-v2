@@ -2,6 +2,8 @@
 
 Phase 1 live acceptance passed for the pinned official VS Code extension. Phase 2 turns that
 accepted bootstrap and exact-turn correlation into one app-lifetime worker and execution service.
+Phase 3 adds Git delivery evidence around that same worker; Aiflow verifies delivery but never
+creates an implementation commit or pushes a target repository itself.
 
 The integration is pinned to:
 
@@ -26,6 +28,10 @@ Available commands:
 
 - `aiflow.runOfficialCodex` — internal programmatic command; not shown in the Command Palette.
 - `aiflow.runClipboardOfficialCodex` — visible clipboard workflow.
+- `aiflow.runGitImplementation` — internal programmatic Git-delivery workflow; not shown in the
+  Command Palette.
+- `aiflow.runClipboardGitImplementation` — visible **Aiflow: Run Clipboard Implementation and
+  Verify Git Delivery** workflow.
 - `aiflow.cancelActiveOfficialCodexRun` — cancels the active exact turn.
 - `aiflow.runOfficialCodexProbe` and `aiflow.cancelOfficialCodexProbe` — preserved Phase 1
   compatibility surfaces, routed through the same service and worker.
@@ -61,6 +67,67 @@ interface OfficialCodexRunResult {
 }
 ```
 
+## Phase 3 Git delivery evidence
+
+`GitImplementationRunRequest` extends the Phase 2 request with a conservative `owner/repository`
+identity, expected branch, and full expected base object ID. Before any official-extension bootstrap
+or real turn, the Git workflow canonicalizes the one workspace, requires that it is the repository
+root and is clean (including untracked files), rejects detached HEAD, and validates the exact branch,
+base SHA, upstream, and safe GitHub repository identity. GitHub HTTPS and `git@github.com:` URLs are
+recognized; raw remote URLs are never put in results, errors, logs, or review envelopes.
+
+All Git commands are trusted fixed argument arrays run with `execFile`, no shell, bounded output and
+timeouts. Aiflow never accepts shell text, Git commands, remote URLs, or paths from Codex output. It
+does not clean, stash, checkout, reset, fetch, pull, commit, or push the target repository.
+
+After the worker reaches a terminal outcome, Aiflow independently reads the branch, ancestry, commits
+after the base (at most 100), worktree status, upstream identity, and the exact remote branch SHA via
+read-only `git ls-remote`. A remote-tracking ref is never used as the sole push proof.
+
+```ts
+interface GitImplementationRunRequest extends OfficialCodexRunRequest {
+  expectedGitHubRepository: string;
+  expectedBranch: string;
+  expectedBaseSha: string;
+}
+
+interface GitDeliveryEvidence {
+  githubRepository: string;
+  branch: string;
+  baseSha: string;
+  headSha: string;
+  commitShas: string[];
+  workingTreeClean: boolean;
+  upstreamRemote: string;
+  upstreamRef: string;
+  remoteHeadSha: string | null;
+  pushVerified: boolean;
+}
+```
+
+Delivery status has deterministic precedence: `codex_not_completed`, `repository_mismatch`,
+`branch_changed`, `history_rewritten`, `no_commit`, `working_tree_dirty`, and `push_not_verified`;
+an inspection exception is `git_inspection_failed`. Otherwise the status is `verified`. Verification
+requires a completed Codex result, matching repository and branch, preserved base ancestry, at least
+one new commit, a clean tree, and a remote branch SHA exactly equal to local HEAD. A failed verification
+does not redispatch Codex.
+
+The visible workflow reads the clipboard exactly, snapshots the clean Git state before model choices,
+then shows a modal with repository, branch, short base SHA, selected model/ID and reasoning, UTF-8
+prompt byte count, and an explicit statement that Aiflow verifies but does not commit or push. The
+existing active-worker cancellation command remains the only cancellation path.
+
+The result can be converted to deterministic JSON with `createImplementationReviewEnvelope()` and
+`serializeImplementationReviewEnvelope()`. Its V1 envelope includes run/delivery/Git evidence and
+Codex identifiers/settings/timestamps, but excludes workspace paths, remote URLs, credentials,
+session content, and the submitted prompt.
+
+Example (values abbreviated):
+
+```json
+{"version":1,"runId":"…","githubRepository":"owner/repository","branch":"main","baseSha":"…","headSha":"…","commitShas":["…"],"pushVerified":true,"deliveryStatus":"verified","codexOutcome":"completed","codexFinalResponse":"…","modelRole":"terra","modelId":"gpt-5.6-terra","reasoningEffort":"high","conversationId":"…","turnId":"…","startedAt":"…","finishedAt":"…"}
+```
+
 ## Local validation
 
 ```sh
@@ -72,7 +139,7 @@ npm test
 
 Automated tests use local session fixtures and injected mocks for VS Code, clipboard, UI, the
 shared service, and IPC. They do not import a live VS Code runtime, connect to Codex IPC, run the
-live probe, or send a real model turn.
+live probe, send a real model turn, or make a real GitHub network call.
 
 ## Phase 2 live acceptance procedure
 
@@ -114,3 +181,24 @@ The file must have bytes exactly `phase 2 verified` and status must show only
 `?? phase2-proof.txt`. Run a second clipboard request and immediately run
 **Aiflow: Cancel Active Official Codex Run**. The output must report a queued or confirmed exact
 turn cancellation; it must not affect another conversation.
+
+## Phase 3 live acceptance procedure
+
+Do not run this procedure from automated tests. Use a disposable GitHub repository with a clean
+tracked base commit and an upstream branch. Open it as the only workspace folder in an Extension
+Development Host, then use **Aiflow: Run Clipboard Implementation and Verify Git Delivery** with:
+
+```text
+Create phase3-proof.txt with bytes exactly equal to: phase 3 verified
+Modify no other file except as required to run the requested validation.
+Run the requested validation.
+Commit the change.
+Push the current branch.
+Report the commit SHA.
+```
+
+Confirm the modal’s exact repository, branch, and base SHA before starting. Require one new commit,
+a clean final worktree, remote branch SHA equal to local HEAD, delivery status `verified`, and a review
+envelope naming the same repository and head SHA. In a second run, use the existing cancellation command
+and verify it still targets only one exact turn. This integration is private and version-specific to
+the pinned official Codex extension; do not run live turns or GitHub network calls in automated tests.

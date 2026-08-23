@@ -8,6 +8,12 @@ import {
   type OfficialCodexCommandUi,
 } from "./officialCodexCommands";
 import {
+  GitImplementationCommandController,
+  type GitImplementationCommandUi,
+  type GitImplementationConfirmation,
+} from "./gitImplementationCommands";
+import { GitImplementationService } from "./gitImplementationService";
+import {
   createWorkspaceAuthorizer,
   getOpenCanonicalWorkspace,
   OfficialCodexExecutionService,
@@ -39,9 +45,11 @@ export function activate(context: vscode.ExtensionContext): void {
     workspaceResolver,
     createVscodeExtensionResolver(),
   );
-  const commands = new OfficialCodexCommandController(
-    service,
-    createVscodeCommandUi(output, workspaceResolver),
+  const commandUi = createVscodeCommandUi(output, workspaceResolver);
+  const commands = new OfficialCodexCommandController(service, commandUi);
+  const gitCommands = new GitImplementationCommandController(
+    new GitImplementationService(service, undefined, createWorkspaceAuthorizer(workspaceResolver)),
+    createVscodeGitImplementationCommandUi(commandUi, output),
   );
   const probe = new ProbeController(commands);
 
@@ -55,12 +63,45 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("aiflow.runClipboardOfficialCodex", () =>
       commands.runClipboard(),
     ),
+    vscode.commands.registerCommand("aiflow.runGitImplementation", (argument: unknown) =>
+      gitCommands.runProgrammatic(argument),
+    ),
+    vscode.commands.registerCommand("aiflow.runClipboardGitImplementation", () =>
+      gitCommands.runClipboard(),
+    ),
     vscode.commands.registerCommand("aiflow.cancelActiveOfficialCodexRun", () =>
       commands.cancelActiveRun(),
     ),
     vscode.commands.registerCommand("aiflow.runOfficialCodexProbe", () => probe.run()),
     vscode.commands.registerCommand("aiflow.cancelOfficialCodexProbe", () => probe.cancel()),
   );
+}
+
+function createVscodeGitImplementationCommandUi(
+  base: OfficialCodexCommandUi,
+  output: vscode.OutputChannel,
+): GitImplementationCommandUi {
+  return {
+    ...base,
+    async confirmGitImplementation(details: GitImplementationConfirmation) {
+      const confirmation = await vscode.window.showWarningMessage(
+        [
+          "Run clipboard implementation through Official Codex?",
+          `GitHub repository: ${details.githubRepository}`,
+          `Branch: ${details.branch}`,
+          `Base SHA: ${details.baseSha.slice(0, 12)}`,
+          `Model: ${details.modelRole} (${details.modelId})`,
+          `Reasoning: ${details.reasoningEffort}`,
+          `Prompt bytes: ${details.promptBytes}`,
+          "Aiflow will verify Git delivery but will not itself commit or push.",
+        ].join("\n"),
+        { modal: true },
+        "Run",
+      );
+      return confirmation === "Run";
+    },
+    appendOutput: (message) => output.appendLine(message),
+  };
 }
 
 export function deactivate(): void {}

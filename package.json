@@ -14,6 +14,8 @@
   "activationEvents": [
     "onCommand:aiflow.runOfficialCodex",
     "onCommand:aiflow.runClipboardOfficialCodex",
+    "onCommand:aiflow.runGitImplementation",
+    "onCommand:aiflow.runClipboardGitImplementation",
     "onCommand:aiflow.cancelActiveOfficialCodexRun",
     "onCommand:aiflow.runOfficialCodexProbe",
     "onCommand:aiflow.cancelOfficialCodexProbe"
@@ -24,6 +26,10 @@
       {
         "command": "aiflow.runClipboardOfficialCodex",
         "title": "Aiflow: Run Clipboard Prompt Through Official Codex"
+      },
+      {
+        "command": "aiflow.runClipboardGitImplementation",
+        "title": "Aiflow: Run Clipboard Implementation and Verify Git Delivery"
       },
       {
         "command": "aiflow.cancelActiveOfficialCodexRun",
