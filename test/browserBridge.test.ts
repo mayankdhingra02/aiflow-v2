@@ -148,6 +148,100 @@ test("revocation and replacement close old review correlation without candidate 
   });
 });
 
+test("revoked review request is rejected after re-pair without candidate recreation", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const token = await pair(bridge, now); const connection = await authenticate(bridge, token, now); const envelope = syntheticEnvelope();
+    const delivery = bridge.sendImplementationReviewEnvelope(envelope); const outbound = sent(connection).at(-1)!; await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: reviewEnvelopeSha256(envelope) }, now, outbound.id)); await delivery;
+    const request = createChatGPTReviewRequest(envelope, { now, uuid: () => "00000000-0000-4000-8000-000000000031" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", request, now)); await bridge.revoke();
+    const next = await authenticate(bridge, await pair(bridge, now), now); await dispatch(bridge, next, createBrowserBridgeMessage("review_request", request, now));
+    assert.equal(sent(next).at(-1)?.type, "error"); assert.equal(bridge.getExecutionCandidate(), null);
+  });
+});
+
+test("revoked review decision is rejected after re-pair without candidate recreation", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const connection = await authenticate(bridge, await pair(bridge, now), now); const envelope = syntheticEnvelope(); const delivery = bridge.sendImplementationReviewEnvelope(envelope); const outbound = sent(connection).at(-1)!; await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: reviewEnvelopeSha256(envelope) }, now, outbound.id)); await delivery;
+    const request = createChatGPTReviewRequest(envelope, { now, uuid: () => "00000000-0000-4000-8000-000000000032" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", request, now)); await bridge.revoke();
+    const next = await authenticate(bridge, await pair(bridge, now), now); const decision = changes(request, now); await dispatch(bridge, next, createBrowserBridgeMessage("review_decision", decision, now));
+    assert.equal(sent(next).at(-1)?.type, "error"); assert.equal(bridge.getExecutionCandidate(), null);
+  });
+});
+
+test("replacement acknowledgement installs only B and permits only B candidate", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const connection = await authenticate(bridge, await pair(bridge, now), now); const a = syntheticEnvelope(); const da = bridge.sendImplementationReviewEnvelope(a); let out = sent(connection).at(-1)!; await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: a.runId, sha256: reviewEnvelopeSha256(a) }, now, out.id)); await da;
+    const ra = createChatGPTReviewRequest(a, { now, uuid: () => "00000000-0000-4000-8000-000000000033" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", ra, now)); const b = syntheticEnvelope(); const db = bridge.sendImplementationReviewEnvelope(b); out = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", changes(ra, now), now)); assert.equal(sent(connection).at(-1)?.type, "error"); await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: b.runId, sha256: reviewEnvelopeSha256(b) }, now, out.id)); await db;
+    const rb = createChatGPTReviewRequest(b, { now, uuid: () => "00000000-0000-4000-8000-000000000034" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", rb, now)); await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", changes(rb, now), now));
+    assert.equal(bridge.getExecutionCandidate()?.requestId, rb.requestId); assert.notEqual(bridge.getExecutionCandidate()?.requestId, ra.requestId);
+  });
+});
+
+test("replacement timeout closes A without replay or candidate resurrection", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const connection = await authenticate(bridge, await pair(bridge, now), now); const a = syntheticEnvelope(); const da = bridge.sendImplementationReviewEnvelope(a); const oa = sent(connection).at(-1)!; await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: a.runId, sha256: reviewEnvelopeSha256(a) }, now, oa.id)); await da;
+    const ra = createChatGPTReviewRequest(a, { now, uuid: () => "00000000-0000-4000-8000-000000000035" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", ra, now)); const sentBefore = sent(connection).length; const rejected = bridge.sendImplementationReviewEnvelope(syntheticEnvelope()); await assert.rejects(rejected, /Timed out/);
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", ra, now)); await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", changes(ra, now), now)); assert.equal(bridge.getExecutionCandidate(), null); assert.equal(sent(connection).length, sentBefore + 3);
+  });
+});
+
+test("terminal execution history survives replacement while its candidate is unavailable", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const connection = await authenticate(bridge, await pair(bridge, now), now);
+    const envelopeA = syntheticEnvelope();
+    const deliveryA = bridge.sendImplementationReviewEnvelope(envelopeA);
+    const outboundA = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelopeA.runId, sha256: reviewEnvelopeSha256(envelopeA) }, now, outboundA.id));
+    await deliveryA;
+    const requestA = createChatGPTReviewRequest(envelopeA, { now, uuid: () => "00000000-0000-4000-8000-000000000036" });
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", requestA, now));
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", changes(requestA, now), now));
+    const candidateA = bridge.getExecutionCandidate()!;
+    const keyA = { requestId: candidateA.requestId, envelopeSha256: candidateA.envelopeSha256, decisionSha256: candidateA.decisionSha256 };
+    assert.ok(bridge.reserveExecutionCandidate(keyA));
+    assert.equal(bridge.consumeExecutionCandidate(keyA), true);
+    bridge.markExecutionRecord(keyA, {
+      executionState: "completed", executionRunId: "00000000-0000-4000-8000-000000000037",
+      finishedAt: now().toISOString(), codexOutcome: "completed", gitDeliveryStatus: "verified",
+      resultHeadSha: "2".repeat(40), pushVerified: true, resultAvailableForBrowserDelivery: true,
+    });
+
+    const replacement = bridge.sendImplementationReviewEnvelope(syntheticEnvelope());
+    assert.equal(bridge.getExecutionCandidate(), null);
+    assert.equal(bridge.getLatestExecutionRecord()?.executionState, "completed");
+    assert.equal(bridge.getLatestExecutionRecord()?.reviewCorrelationState, "superseded");
+    await assert.rejects(replacement, /Timed out/);
+  });
+});
+
+test("terminal execution history survives revoke while its candidate is unavailable", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const connection = await authenticate(bridge, await pair(bridge, now), now);
+    const envelope = syntheticEnvelope();
+    const delivery = bridge.sendImplementationReviewEnvelope(envelope);
+    const outbound = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: reviewEnvelopeSha256(envelope) }, now, outbound.id));
+    await delivery;
+    const request = createChatGPTReviewRequest(envelope, { now, uuid: () => "00000000-0000-4000-8000-000000000038" });
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", request, now));
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", changes(request, now), now));
+    const candidate = bridge.getExecutionCandidate()!;
+    const key = { requestId: candidate.requestId, envelopeSha256: candidate.envelopeSha256, decisionSha256: candidate.decisionSha256 };
+    assert.ok(bridge.reserveExecutionCandidate(key));
+    assert.equal(bridge.consumeExecutionCandidate(key), true);
+    bridge.markExecutionRecord(key, {
+      executionState: "completed", executionRunId: "00000000-0000-4000-8000-000000000039",
+      finishedAt: now().toISOString(), codexOutcome: "completed", gitDeliveryStatus: "verified",
+      resultHeadSha: "2".repeat(40), pushVerified: true, resultAvailableForBrowserDelivery: true,
+    });
+
+    await bridge.revoke();
+    assert.equal(bridge.getExecutionCandidate(), null);
+    assert.equal(bridge.getLatestExecutionRecord()?.executionState, "completed");
+    assert.equal(bridge.getLatestExecutionRecord()?.reviewCorrelationState, "revoked");
+  });
+});
+
 test("expired pairing, invalid web origins, binary frames, and replacement connections are rejected deterministically", async () => {
   await withBridge(async ({ bridge, now, advance }) => {
     const pairing = await bridge.beginPairing();
@@ -206,6 +300,20 @@ async function authenticate(bridge: BrowserBridge, token: string, now: () => Dat
   await dispatch(bridge, connection, createBrowserBridgeMessage("authenticate", { extensionId: EXTENSION_ID, browserToken: token }, now));
   assert.equal(sent(connection)[0].type, "authenticated");
   return connection;
+}
+
+function changes(request: ReturnType<typeof createChatGPTReviewRequest>, now: () => Date) {
+  return {
+    version: 1 as const,
+    requestId: request.requestId,
+    runId: request.runId,
+    envelopeSha256: request.envelopeSha256,
+    verdict: "CHANGES_REQUESTED" as const,
+    modelRole: "terra" as const,
+    reasoningEffort: "high" as const,
+    codexInstruction: "Fix 🙂\nexactly",
+    reviewedAt: now().toISOString(),
+  };
 }
 
 class MemorySecrets implements BrowserBridgeSecretStorage {

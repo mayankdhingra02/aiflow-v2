@@ -54,12 +54,35 @@ test("returned unavailable Git evidence retains terminal outcomes without a fabr
 
 test("controller retains every returned terminal outcome once with exact reviewed request fields", async () => {
   for (const [outcome, delivery, head] of [["completed", "verified", "d".repeat(40)], ["failed", "codex_not_completed", ""], ["cancelled", "codex_not_completed", ""], ["completed", "git_inspection_failed", ""], ["completed", "branch_changed", ""]] as const) {
-    const candidate = makeCandidate(); const provider = new Provider(candidate); const store = new LatestGitImplementationResultStore(); const calls: any[] = []; const logged: any[] = [];
+    const candidate = makeCandidate(); const provider = new Provider(candidate); const store = new LatestGitImplementationResultStore(); const stored: any[] = []; const originalReplace = store.replace.bind(store); (store as any).replace = (value: any) => { stored.push(value); originalReplace(value); }; const calls: any[] = []; const logged: any[] = [];
     const controller = new BrowserReviewExecutionController(provider, { snapshot: async () => ({ repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, baseSha: candidate.reviewedHeadSha }), run: async (request: unknown) => { calls.push(request); return { ...result(request as any), deliveryStatus: delivery, codex: { ...result(request as any).codex, outcome }, git: { ...result(request as any).git, headSha: head, pushVerified: Boolean(head) } }; } } as any, store, ui(true), randomUUID, { log: (value: any) => logged.push(value) } as any);
     await controller.run(); const record = provider.getLatestExecutionRecord()!;
     assert.equal(record.executionState, outcome === "failed" ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"); assert.equal(record.resultHeadSha, head || undefined); assert.equal(record.resultAvailableForBrowserDelivery, delivery === "verified");
-    assert.equal(calls.length, 1); assert.equal(calls[0].prompt, candidate.codexInstruction); assert.equal(calls[0].modelRole, candidate.modelRole); assert.equal(calls[0].reasoningEffort, candidate.reasoningEffort); assert.equal(calls[0].expectedGitHubRepository, candidate.reviewedRepository); assert.equal(logged.length, 1); assert.equal(store.get()?.runId, calls[0].runId); await assert.rejects(controller.run()); assert.equal(calls.length, 1);
+    assert.equal(calls.length, 1); assert.equal(calls[0].prompt, "Fix 🙂\nexactly"); assert.equal(calls[0].prompt, candidate.codexInstruction); assert.equal(calls[0].modelRole, candidate.modelRole); assert.equal(calls[0].reasoningEffort, candidate.reasoningEffort); assert.equal(calls[0].expectedGitHubRepository, candidate.reviewedRepository); assert.equal(calls[0].expectedBranch, candidate.reviewedBranch); assert.equal(calls[0].expectedBaseSha, candidate.reviewedHeadSha); assert.equal(stored.length, 1); assert.equal(stored[0].runId, calls[0].runId); assert.equal(logged.length, 1); assert.equal(store.get()?.runId, calls[0].runId); await assert.rejects(controller.run()); assert.equal(calls.length, 1); assert.equal(stored.length, 1); assert.equal(logged.length, 1); assert.equal(store.get()?.runId, calls[0].runId);
   }
+});
+
+test("controller consumes a candidate and records execution_error when the service throws", async () => {
+  const candidate = makeCandidate(); const provider = new Provider(candidate); const store = new LatestGitImplementationResultStore(); const stored: any[] = []; const originalReplace = store.replace.bind(store); (store as any).replace = (value: any) => { stored.push(value); originalReplace(value); }; const calls: any[] = []; const logged: any[] = [];
+  const runId = "00000000-0000-4000-8000-000000000041";
+  const controller = new BrowserReviewExecutionController(provider, {
+    snapshot: async () => ({ repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, baseSha: candidate.reviewedHeadSha }),
+    run: async (request: unknown) => { calls.push(request); throw new Error("synthetic service error"); },
+  } as any, store, ui(true), () => runId, { log: (value: any) => logged.push(value) } as any);
+
+  await assert.rejects(controller.run(), /Reviewed execution failed: synthetic service error/);
+  const record = provider.getLatestExecutionRecord()!;
+  assert.equal(calls.length, 1);
+  assert.equal(provider.getExecutionCandidate(), null);
+  assert.equal(provider.getExecutionCandidateState(), "consumed");
+  assert.equal(record.executionState, "execution_error");
+  assert.equal(record.executionRunId, runId);
+  assert.equal(store.get(), null);
+  assert.equal(stored.length, 0);
+  assert.equal(logged.length, 0);
+  await assert.rejects(controller.run());
+  assert.equal(calls.length, 1);
+  assert.equal(logged.length, 0);
 });
 
 function makeCandidate(): BrowserReviewExecutionCandidate { return createExecutionCandidate({ requestId: randomUUID(), sourceRunId: randomUUID(), envelopeSha256: "a".repeat(64), decisionSha256: "b".repeat(64), reviewedRepository: "Owner/repository", reviewedBranch: "main", reviewedHeadSha: "c".repeat(40), modelRole: "terra", reasoningEffort: "high", codexInstruction: "Fix 🙂\nexactly", reviewedAt: "2026-01-01T00:00:00.000Z", decisionAcknowledgedAt: "2026-01-01T00:00:01.000Z" }); }
