@@ -132,6 +132,22 @@ test("review decisions require an acknowledged envelope and a matching one-time 
   });
 });
 
+test("revocation and replacement close old review correlation without candidate resurrection", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const token = await pair(bridge, now); const connection = await authenticate(bridge, token, now); const envelopeA = syntheticEnvelope();
+    const deliverA = bridge.sendImplementationReviewEnvelope(envelopeA); const outboundA = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelopeA.runId, sha256: reviewEnvelopeSha256(envelopeA) }, now, outboundA.id)); await deliverA;
+    const requestA = createChatGPTReviewRequest(envelopeA, { now, uuid: () => "00000000-0000-4000-8000-000000000021" }); await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", requestA, now));
+    await bridge.revoke(); const newToken = await pair(bridge, now); const second = await authenticate(bridge, newToken, now);
+    await dispatch(bridge, second, createBrowserBridgeMessage("review_request", requestA, now)); assert.equal(sent(second).at(-1)?.type, "error"); assert.equal(bridge.getExecutionCandidate(), null);
+    const envelopeB = syntheticEnvelope(); const deliverB = bridge.sendImplementationReviewEnvelope(envelopeB); const outboundB = sent(second).at(-1)!;
+    const decisionA = { version: 1 as const, requestId: requestA.requestId, runId: requestA.runId, envelopeSha256: requestA.envelopeSha256, verdict: "CHANGES_REQUESTED" as const, modelRole: "terra" as const, reasoningEffort: "high" as const, codexInstruction: "old", reviewedAt: now().toISOString() };
+    await dispatch(bridge, second, createBrowserBridgeMessage("review_decision", decisionA, now)); assert.equal(sent(second).at(-1)?.type, "error");
+    await dispatch(bridge, second, createBrowserBridgeMessage("ack", { runId: envelopeB.runId, sha256: reviewEnvelopeSha256(envelopeB) }, now, outboundB.id)); await deliverB;
+    assert.equal(bridge.getExecutionCandidate(), null);
+  });
+});
+
 test("expired pairing, invalid web origins, binary frames, and replacement connections are rejected deterministically", async () => {
   await withBridge(async ({ bridge, now, advance }) => {
     const pairing = await bridge.beginPairing();

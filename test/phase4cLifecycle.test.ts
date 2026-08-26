@@ -52,6 +52,16 @@ test("returned unavailable Git evidence retains terminal outcomes without a fabr
   }
 });
 
+test("controller retains every returned terminal outcome once with exact reviewed request fields", async () => {
+  for (const [outcome, delivery, head] of [["completed", "verified", "d".repeat(40)], ["failed", "codex_not_completed", ""], ["cancelled", "codex_not_completed", ""], ["completed", "git_inspection_failed", ""], ["completed", "branch_changed", ""]] as const) {
+    const candidate = makeCandidate(); const provider = new Provider(candidate); const store = new LatestGitImplementationResultStore(); const calls: any[] = []; const logged: any[] = [];
+    const controller = new BrowserReviewExecutionController(provider, { snapshot: async () => ({ repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, baseSha: candidate.reviewedHeadSha }), run: async (request: unknown) => { calls.push(request); return { ...result(request as any), deliveryStatus: delivery, codex: { ...result(request as any).codex, outcome }, git: { ...result(request as any).git, headSha: head, pushVerified: Boolean(head) } }; } } as any, store, ui(true), randomUUID, { log: (value: any) => logged.push(value) } as any);
+    await controller.run(); const record = provider.getLatestExecutionRecord()!;
+    assert.equal(record.executionState, outcome === "failed" ? "failed" : outcome === "cancelled" ? "cancelled" : "completed"); assert.equal(record.resultHeadSha, head || undefined); assert.equal(record.resultAvailableForBrowserDelivery, delivery === "verified");
+    assert.equal(calls.length, 1); assert.equal(calls[0].prompt, candidate.codexInstruction); assert.equal(calls[0].modelRole, candidate.modelRole); assert.equal(calls[0].reasoningEffort, candidate.reasoningEffort); assert.equal(calls[0].expectedGitHubRepository, candidate.reviewedRepository); assert.equal(logged.length, 1); assert.equal(store.get()?.runId, calls[0].runId); await assert.rejects(controller.run()); assert.equal(calls.length, 1);
+  }
+});
+
 function makeCandidate(): BrowserReviewExecutionCandidate { return createExecutionCandidate({ requestId: randomUUID(), sourceRunId: randomUUID(), envelopeSha256: "a".repeat(64), decisionSha256: "b".repeat(64), reviewedRepository: "Owner/repository", reviewedBranch: "main", reviewedHeadSha: "c".repeat(40), modelRole: "terra", reasoningEffort: "high", codexInstruction: "Fix 🙂\nexactly", reviewedAt: "2026-01-01T00:00:00.000Z", decisionAcknowledgedAt: "2026-01-01T00:00:01.000Z" }); }
 function result(request: any): any { const time = "2026-01-01T00:00:00.000Z"; return { runId: request.runId, deliveryStatus: "verified", codex: { outcome: "completed", finalResponse: "done", requestedModelRole: "terra", requestedModelId: "gpt-5.6-codex", requestedReasoningEffort: "high", recordedModelId: null, recordedReasoningEffort: null, conversationId: randomUUID(), turnId: randomUUID(), startedAt: time, finishedAt: time }, git: { githubRepository: "Owner/repository", branch: "main", baseSha: "c".repeat(40), headSha: "d".repeat(40), commitShas: [], pushVerified: true, workingTreeClean: true, upstreamRemote: "origin", upstreamRef: "origin/main", remoteHeadSha: "d".repeat(40) } }; }
 function requireDigest(envelope: any): string { const { reviewEnvelopeSha256 } = require("../src/browserBridgeProtocol"); return reviewEnvelopeSha256(envelope); }
