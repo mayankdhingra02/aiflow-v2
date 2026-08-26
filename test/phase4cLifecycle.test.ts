@@ -51,7 +51,7 @@ function requireDigest(envelope: any): string { const { reviewEnvelopeSha256 } =
 function ui(confirm: boolean): any { return { getOpenCanonicalWorkspace: async () => "/workspace", confirmReviewedChange: async () => confirm, appendOutput: () => undefined, showError: () => undefined }; }
 class Provider implements BrowserReviewCandidateProvider {
   private state: any = "available"; private record: BrowserReviewExecutionRecord;
-  constructor(private readonly candidate: BrowserReviewExecutionCandidate) { this.record = { ...candidate, repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, candidateState: "available", executionState: "available", resultAvailableForBrowserDelivery: false }; }
+  constructor(private readonly candidate: BrowserReviewExecutionCandidate) { this.record = { ...candidate, repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, candidateState: "available", executionState: "available", resultAvailableForBrowserDelivery: false, reviewCorrelationState: "current" }; }
   getExecutionCandidate() { return this.state === "available" ? { ...this.candidate } : null; } getExecutionCandidateState() { return this.state; }
   reserveExecutionCandidate() { if (this.state !== "available") return null; this.state = "reserved"; this.record = { ...this.record, candidateState: "reserved", executionState: "reserved" }; return { ...this.candidate }; }
   consumeExecutionCandidate() { if (this.state !== "reserved") return false; this.state = "consumed"; this.record = { ...this.record, candidateState: "consumed" }; return true; }

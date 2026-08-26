@@ -22,7 +22,7 @@ import {
   type ChatGPTReviewDecisionV1,
   type ChatGPTReviewRequestV1,
 } from "./reviewHandoffContracts";
-import { createExecutionCandidate, validateBrowserReviewExecutionCandidate, type BrowserReviewCandidateProvider, type BrowserReviewCandidateState, type BrowserReviewExecutionCandidate, type BrowserReviewExecutionRecord } from "./browserReviewExecution";
+import { createExecutionCandidate, validateBrowserReviewExecutionCandidate, validateBrowserReviewExecutionRecord, type BrowserReviewCandidateProvider, type BrowserReviewCandidateState, type BrowserReviewExecutionCandidate, type BrowserReviewExecutionRecord } from "./browserReviewExecution";
 
 const PAIRING_CODE_TTL_MS = 5 * 60_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -122,7 +122,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
 
   async revoke(): Promise<void> {
     this.pairing = null;
-    this.invalidateExecutableCandidate();
+    this.closeReviewCorrelation("revoked");
     await Promise.all([this.options.secrets.delete(TOKEN_HASH_SECRET), this.options.secrets.delete(EXTENSION_ID_SECRET)]);
     this.pairedExtensionId = null;
     this.closeAuthenticated(1008, "Pairing revoked");
@@ -200,7 +200,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
     if (this.executionCandidateState !== "available" || !this.executionCandidate) return null;
     validateBrowserReviewExecutionCandidate(this.executionCandidate); return { ...this.executionCandidate };
   }
-  getLatestExecutionRecord(): BrowserReviewExecutionRecord | null { if (!this.latestExecutionRecord) return null; validateBrowserReviewExecutionCandidate(this.latestExecutionRecord); return { ...this.latestExecutionRecord }; }
+  getLatestExecutionRecord(): BrowserReviewExecutionRecord | null { if (!this.latestExecutionRecord) return null; validateBrowserReviewExecutionRecord(this.latestExecutionRecord); return { ...this.latestExecutionRecord }; }
 
   getExecutionCandidateState(): BrowserReviewCandidateState { return this.executionCandidateState; }
 
@@ -221,7 +221,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
   }
   markExecutionRecord(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">, patch: Partial<BrowserReviewExecutionRecord>): void {
     if (!this.latestExecutionRecord || !sameCandidate(key, this.latestExecutionRecord)) return;
-    validateBrowserReviewExecutionCandidate(this.latestExecutionRecord); this.updateExecutionRecord(patch);
+    validateBrowserReviewExecutionRecord(this.latestExecutionRecord); this.updateExecutionRecord(patch);
   }
 
   private async ensureListening(): Promise<void> {
@@ -496,18 +496,22 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
     this.latestExecutionRecord = null;
     this.executionCandidateState = "unavailable";
   }
-  private invalidateExecutableCandidate(): void {
-    if (this.executionCandidate) this.updateExecutionRecord({ candidateState: "unavailable", executionState: "superseded", resultAvailableForBrowserDelivery: false });
+  private invalidateExecutableCandidate(correlation: "superseded" | "revoked" = "superseded"): void {
+    if (this.executionCandidate) {
+      const terminal = this.latestExecutionRecord && ["completed", "failed", "cancelled", "execution_error"].includes(this.latestExecutionRecord.executionState);
+      this.updateExecutionRecord({ candidateState: "unavailable", ...(terminal ? {} : { executionState: "superseded" }), reviewCorrelationState: correlation, correlationClosedAt: this.now().toISOString(), ...(terminal ? {} : { resultAvailableForBrowserDelivery: false }) });
+    }
     this.executionCandidate = null;
     this.executionCandidateState = "unavailable";
   }
-  private closeReviewCorrelationForReplacement(): void {
-    this.invalidateExecutableCandidate(); this.latestAcknowledgedDelivery = null; this.latestAcknowledgedEnvelope = null; this.latestReviewRequest = null; this.latestReviewDecision = null;
+  private closeReviewCorrelationForReplacement(): void { this.closeReviewCorrelation("superseded"); }
+  private closeReviewCorrelation(state: "superseded" | "revoked"): void {
+    this.invalidateExecutableCandidate(state); this.latestAcknowledgedDelivery = null; this.latestAcknowledgedEnvelope = null; this.latestReviewRequest = null; this.latestReviewDecision = null; this.rejectPending(new Error("Browser review correlation closed"));
   }
   private updateExecutionRecord(patch: Partial<BrowserReviewExecutionRecord>): void {
     if (!this.latestExecutionRecord) return;
-    validateBrowserReviewExecutionCandidate(this.latestExecutionRecord);
-    this.latestExecutionRecord = { ...this.latestExecutionRecord, ...patch };
+    validateBrowserReviewExecutionRecord(this.latestExecutionRecord);
+    const next = { ...this.latestExecutionRecord, ...patch }; validateBrowserReviewExecutionRecord(next); this.latestExecutionRecord = next;
   }
 
   private now(): Date { return (this.options.now ?? (() => new Date()))(); }
@@ -519,7 +523,7 @@ function cloneEnvelope(envelope: ImplementationReviewEnvelopeV1): Implementation
 function sameCandidate(left: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">, right: BrowserReviewExecutionCandidate): boolean { return left.requestId === right.requestId && left.envelopeSha256 === right.envelopeSha256 && left.decisionSha256 === right.decisionSha256; }
 function recordFromCandidate(candidate: BrowserReviewExecutionCandidate, candidateState: BrowserReviewCandidateState, executionState: BrowserReviewExecutionRecord["executionState"]): BrowserReviewExecutionRecord {
   validateBrowserReviewExecutionCandidate(candidate);
-  return { ...candidate, repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, candidateState, executionState, resultAvailableForBrowserDelivery: false };
+  return { ...candidate, repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, candidateState, executionState, resultAvailableForBrowserDelivery: false, reviewCorrelationState: "current" };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

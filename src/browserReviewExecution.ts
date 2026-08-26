@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { repositoryIdentityEquals, type GitImplementationRunResult } from "./gitImplementationContracts";
+import { createImplementationReviewEnvelope, repositoryIdentityEquals, serializeImplementationReviewEnvelope, validateImplementationReviewEnvelope, type GitDeliveryStatus, type GitImplementationRunResult } from "./gitImplementationContracts";
 import { modelIdForRole, type ModelRole, type ReasoningEffort } from "./officialCodexContracts";
 import type { GitPreflight } from "./gitInspection";
 import type { LatestGitImplementationResultStore } from "./latestGitImplementationResult";
@@ -19,6 +19,7 @@ export interface BrowserReviewExecutionRecord extends BrowserReviewExecutionCand
   executionRunId?: string; executionState: BrowserReviewExecutionState; startedAt?: string; finishedAt?: string;
   codexOutcome?: "completed" | "failed" | "cancelled"; gitDeliveryStatus?: string; resultHeadSha?: string; pushVerified?: boolean;
   resultAvailableForBrowserDelivery: boolean; failureCode?: string; failureMessage?: string;
+  reviewCorrelationState: "current" | "superseded" | "revoked"; correlationClosedAt?: string;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA = /^[0-9a-f]{64}$/;
@@ -28,6 +29,12 @@ export function validateBrowserReviewExecutionCandidate(value: unknown): asserts
   const c = value as BrowserReviewExecutionCandidate;
   if (!c || typeof c !== "object" || !UUID.test(c.requestId) || !UUID.test(c.sourceRunId) || !SHA.test(c.envelopeSha256) || !SHA.test(c.decisionSha256) || !SHA.test(c.instructionSha256) || !REPOSITORY.test(c.reviewedRepository) || !OBJECT.test(c.reviewedHeadSha) || typeof c.reviewedBranch !== "string" || !c.reviewedBranch.length || c.reviewedBranch.length > 255 || /[\0\r\n]/.test(c.reviewedBranch) || !["luna", "terra", "sol"].includes(c.modelRole) || !["low", "medium", "high", "xhigh"].includes(c.reasoningEffort) || !utc(c.reviewedAt) || !utc(c.decisionAcknowledgedAt) || typeof c.codexInstruction !== "string" || !c.codexInstruction.trim() || Buffer.byteLength(c.codexInstruction, "utf8") > MAX_CODEX_INSTRUCTION_BYTES || c.instructionUtf8Bytes !== Buffer.byteLength(c.codexInstruction, "utf8") || c.instructionSha256 !== createHash("sha256").update(c.codexInstruction, "utf8").digest("hex")) throw new Error("Invalid browser review execution candidate");
 }
+export function validateBrowserReviewExecutionRecord(value: unknown): asserts value is BrowserReviewExecutionRecord {
+  validateBrowserReviewExecutionCandidate(value); const r = value as BrowserReviewExecutionRecord;
+  if (r.repository !== r.reviewedRepository || r.branch !== r.reviewedBranch || !["unavailable", "available", "reserved", "consumed"].includes(r.candidateState) || !["available", "confirmation_cancelled", "reserved", "running", "completed", "failed", "cancelled", "execution_error", "superseded"].includes(r.executionState) || !["current", "superseded", "revoked"].includes(r.reviewCorrelationState) || typeof r.resultAvailableForBrowserDelivery !== "boolean" || (r.executionRunId !== undefined && !UUID.test(r.executionRunId)) || (r.startedAt !== undefined && !utc(r.startedAt)) || (r.finishedAt !== undefined && !utc(r.finishedAt)) || (r.codexOutcome !== undefined && !["completed", "failed", "cancelled"].includes(r.codexOutcome)) || (r.gitDeliveryStatus !== undefined && !DELIVERY.has(r.gitDeliveryStatus as GitDeliveryStatus)) || (r.resultHeadSha !== undefined && !OBJECT.test(r.resultHeadSha)) || (r.pushVerified !== undefined && typeof r.pushVerified !== "boolean") || (r.failureCode !== undefined && (!/^[A-Z_]{1,64}$/.test(r.failureCode))) || (r.failureMessage !== undefined && r.failureMessage.length > 300) || (r.correlationClosedAt !== undefined && !utc(r.correlationClosedAt))) throw new Error("Invalid browser review execution record");
+}
+const DELIVERY = new Set<GitDeliveryStatus>(["verified", "codex_not_completed", "branch_changed", "history_rewritten", "no_commit", "working_tree_dirty", "repository_mismatch", "push_not_verified", "git_inspection_failed"]);
+export function isGitResultDeliverable(result: GitImplementationRunResult | null): boolean { try { if (!result) return false; const envelope = createImplementationReviewEnvelope(result); validateImplementationReviewEnvelope(envelope); serializeImplementationReviewEnvelope(envelope); return true; } catch { return false; } }
 export type BrowserReviewCandidateState = "unavailable" | "available" | "reserved" | "consumed";
 export interface BrowserReviewCandidateProvider {
   getExecutionCandidate(): BrowserReviewExecutionCandidate | null;
@@ -68,12 +75,12 @@ export class BrowserReviewExecutionController {
       this.candidates.markExecutionRecord(pick(candidate), { executionState: "confirmation_cancelled" }); return undefined;
     }
     const key = pick(candidate);
+    const runId = this.uuid();
+    if (!UUID.test(runId)) throw this.fail("Browser review execution ID is invalid");
     const reserved = this.candidates.reserveExecutionCandidate(key);
     if (!reserved) throw this.fail("Browser review decision is stale or has already been used");
     // Consumption happens before invocation: an ambiguous/cancelled real turn is never replayed.
     if (!this.candidates.consumeExecutionCandidate(key)) throw this.fail("Browser review decision could not be consumed");
-    const runId = this.uuid();
-    if (!UUID.test(runId)) throw this.fail("Browser review execution ID is invalid");
     this.candidates.markExecutionRecord(key, { candidateState: "consumed", executionRunId: runId, executionState: "running", startedAt: new Date().toISOString() });
     try {
       const result = await this.service.run({ runId, workspacePath, prompt: reserved.codexInstruction,
@@ -81,7 +88,7 @@ export class BrowserReviewExecutionController {
         expectedGitHubRepository: reserved.reviewedRepository, expectedBranch: reserved.reviewedBranch, expectedBaseSha: reserved.reviewedHeadSha });
       this.results.replace(result);
       this.logger?.log(result); if (!this.logger) this.log(result);
-      this.candidates.markExecutionRecord(key, { executionState: result.codex.outcome === "completed" ? "completed" : result.codex.outcome === "cancelled" ? "cancelled" : "failed", finishedAt: new Date().toISOString(), codexOutcome: result.codex.outcome, gitDeliveryStatus: result.deliveryStatus, resultHeadSha: result.git.headSha, pushVerified: result.git.pushVerified, resultAvailableForBrowserDelivery: true });
+      this.candidates.markExecutionRecord(key, { executionState: result.codex.outcome === "completed" ? "completed" : result.codex.outcome === "cancelled" ? "cancelled" : "failed", finishedAt: new Date().toISOString(), codexOutcome: result.codex.outcome, gitDeliveryStatus: result.deliveryStatus, resultHeadSha: result.git.headSha, pushVerified: result.git.pushVerified, resultAvailableForBrowserDelivery: isGitResultDeliverable(result) });
       return result;
     } catch (error) {
       this.candidates.markExecutionRecord(key, { executionState: "execution_error", finishedAt: new Date().toISOString(), failureCode: "EXECUTION_FAILED", failureMessage: bounded(error), resultAvailableForBrowserDelivery: false });
@@ -92,9 +99,9 @@ export class BrowserReviewExecutionController {
   show(): void {
     const record = this.candidates.getLatestExecutionRecord();
     if (!record) { const summary = "Browser review execution: no available record"; this.ui.appendOutput(summary); this.ui.showInformation?.(`Aiflow Browser Bridge: ${summary}`); return; }
-    validateBrowserReviewExecutionCandidate(record); this.writeInstruction(record);
-    const available = record.executionRunId === this.results.get()?.runId;
-    const summary = `Browser review execution: request=${record.requestId}; source=${record.sourceRunId}; execution=${record.executionRunId ?? "<none>"}; state=${record.executionState}; candidate=${record.candidateState}; repository=${record.repository}; branch=${record.branch}; reviewed SHA=${record.reviewedHeadSha}; result available=${available}`;
+    validateBrowserReviewExecutionRecord(record); this.writeInstruction(record);
+    const resultMatch = record.executionRunId === this.results.get()?.runId; const deliverable = resultMatch && isGitResultDeliverable(this.results.get());
+    const summary = `Browser review execution: request=${record.requestId}; source=${record.sourceRunId}; execution=${record.executionRunId ?? "<none>"}; state=${record.executionState}; correlation=${record.reviewCorrelationState}; candidate=${record.candidateState}; repository=${record.repository}; branch=${record.branch}; reviewed SHA=${record.reviewedHeadSha}; model=${record.modelRole}; reasoning=${record.reasoningEffort}; instruction bytes=${record.instructionUtf8Bytes}; instruction SHA=${record.instructionSha256}; started=${record.startedAt ?? "<none>"}; finished=${record.finishedAt ?? "<none>"}; Codex=${record.codexOutcome ?? "<none>"}; delivery=${record.gitDeliveryStatus ?? "<none>"}; head=${record.resultHeadSha ?? "<none>"}; push=${record.pushVerified ?? false}; result match=${resultMatch}; deliverable=${deliverable}; failure=${record.failureCode ?? "<none>"}:${record.failureMessage ?? "<none>"}`;
     this.ui.appendOutput(summary); this.ui.showInformation?.(`Aiflow Browser Bridge: ${summary.slice(0, 300)}`);
   }
   private writeInstruction(candidate: BrowserReviewExecutionCandidate): void { this.ui.appendOutput("--- Browser Review Codex Instruction (user-requested display) ---"); this.ui.appendOutput(candidate.codexInstruction); this.ui.appendOutput("--- End Browser Review Codex Instruction ---"); }
