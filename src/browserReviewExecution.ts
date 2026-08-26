@@ -82,18 +82,19 @@ export class BrowserReviewExecutionController {
     // Consumption happens before invocation: an ambiguous/cancelled real turn is never replayed.
     if (!this.candidates.consumeExecutionCandidate(key)) throw this.fail("Browser review decision could not be consumed");
     this.candidates.markExecutionRecord(key, { candidateState: "consumed", executionRunId: runId, executionState: "running", startedAt: new Date().toISOString() });
+    let result: GitImplementationRunResult;
     try {
-      const result = await this.service.run({ runId, workspacePath, prompt: reserved.codexInstruction,
+      result = await this.service.run({ runId, workspacePath, prompt: reserved.codexInstruction,
         modelRole: reserved.modelRole, reasoningEffort: reserved.reasoningEffort,
         expectedGitHubRepository: reserved.reviewedRepository, expectedBranch: reserved.reviewedBranch, expectedBaseSha: reserved.reviewedHeadSha });
-      this.results.replace(result);
-      this.logger?.log(result); if (!this.logger) this.log(result);
-      this.candidates.markExecutionRecord(key, { executionState: result.codex.outcome === "completed" ? "completed" : result.codex.outcome === "cancelled" ? "cancelled" : "failed", finishedAt: new Date().toISOString(), codexOutcome: result.codex.outcome, gitDeliveryStatus: result.deliveryStatus, resultHeadSha: result.git.headSha, pushVerified: result.git.pushVerified, resultAvailableForBrowserDelivery: isGitResultDeliverable(result) });
-      return result;
     } catch (error) {
       this.candidates.markExecutionRecord(key, { executionState: "execution_error", finishedAt: new Date().toISOString(), failureCode: "EXECUTION_FAILED", failureMessage: bounded(error), resultAvailableForBrowserDelivery: false });
       throw this.fail(`Reviewed execution failed: ${bounded(error)}`);
     }
+    this.results.replace(result);
+    this.logger?.log(result); if (!this.logger) this.log(result);
+    this.candidates.markExecutionRecord(key, terminalResultRecordPatch(result, () => new Date()));
+    return result;
   }
 
   show(): void {
@@ -112,6 +113,10 @@ export function createExecutionCandidate(value: Omit<BrowserReviewExecutionCandi
   const instructionUtf8Bytes = Buffer.byteLength(value.codexInstruction, "utf8");
   const candidate = { ...value, instructionUtf8Bytes, instructionSha256: createHash("sha256").update(value.codexInstruction, "utf8").digest("hex") };
   validateBrowserReviewExecutionCandidate(candidate); return candidate;
+}
+export function terminalResultRecordPatch(result: GitImplementationRunResult, now: () => Date = () => new Date()): Partial<BrowserReviewExecutionRecord> {
+  const head = /^[0-9a-f]{40,64}$/i.test(result.git.headSha) ? result.git.headSha : undefined;
+  return { executionState: result.codex.outcome === "completed" ? "completed" : result.codex.outcome === "cancelled" ? "cancelled" : "failed", finishedAt: now().toISOString(), codexOutcome: result.codex.outcome, gitDeliveryStatus: result.deliveryStatus, ...(head ? { resultHeadSha: head } : {}), pushVerified: result.git.pushVerified, resultAvailableForBrowserDelivery: isGitResultDeliverable(result) };
 }
 function utc(value: unknown): boolean { if (typeof value !== "string") return false; const date = new Date(value); return !Number.isNaN(date.getTime()) && date.toISOString() === value && value.endsWith("Z"); }
 function pick(candidate: BrowserReviewExecutionCandidate) { return { requestId: candidate.requestId, envelopeSha256: candidate.envelopeSha256, decisionSha256: candidate.decisionSha256 }; }

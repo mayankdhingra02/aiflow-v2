@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
-import { BrowserReviewExecutionController, createExecutionCandidate, type BrowserReviewCandidateProvider, type BrowserReviewExecutionCandidate, type BrowserReviewExecutionRecord, validateBrowserReviewExecutionCandidate } from "../src/browserReviewExecution";
+import { BrowserReviewExecutionController, createExecutionCandidate, terminalResultRecordPatch, type BrowserReviewCandidateProvider, type BrowserReviewExecutionCandidate, type BrowserReviewExecutionRecord, validateBrowserReviewExecutionCandidate } from "../src/browserReviewExecution";
 import { LatestGitImplementationResultStore } from "../src/latestGitImplementationResult";
 import { LatestGitResultBrowserDeliveryController, LatestGitResultBrowserDeliveryError } from "../src/latestGitResultBrowserDelivery";
 
@@ -43,6 +43,13 @@ test("explicit browser result delivery accepts only a fully correlated acknowled
   const bad = new LatestGitResultBrowserDeliveryController(store, { sendImplementationReviewEnvelope: async () => ({ bridgeMessageId: "bad", runId: envelope.runId, envelopeSha256: "0".repeat(64), acknowledgedAt: "bad" }) }, ui);
   await assert.rejects(bad.send(), (error: unknown) => error instanceof LatestGitResultBrowserDeliveryError && error.code === "ACKNOWLEDGEMENT_MISMATCH");
   assert.equal(store.get()?.runId, value.runId);
+});
+
+test("returned unavailable Git evidence retains terminal outcomes without a fabricated result head", () => {
+  for (const [outcome, delivery] of [["failed", "codex_not_completed"], ["cancelled", "codex_not_completed"], ["completed", "git_inspection_failed"], ["completed", "branch_changed"]] as const) {
+    const patch = terminalResultRecordPatch({ ...result({ runId: randomUUID() } as any), deliveryStatus: delivery, codex: { ...result({ runId: randomUUID() } as any).codex, outcome }, git: { ...result({ runId: randomUUID() } as any).git, headSha: "", pushVerified: false } } as any, () => new Date("2026-01-01T00:00:00.000Z"));
+    assert.equal(patch.executionState, outcome === "cancelled" ? "cancelled" : outcome === "failed" ? "failed" : "completed"); assert.equal(patch.resultHeadSha, undefined); assert.equal(patch.resultAvailableForBrowserDelivery, false);
+  }
 });
 
 function makeCandidate(): BrowserReviewExecutionCandidate { return createExecutionCandidate({ requestId: randomUUID(), sourceRunId: randomUUID(), envelopeSha256: "a".repeat(64), decisionSha256: "b".repeat(64), reviewedRepository: "Owner/repository", reviewedBranch: "main", reviewedHeadSha: "c".repeat(40), modelRole: "terra", reasoningEffort: "high", codexInstruction: "Fix 🙂\nexactly", reviewedAt: "2026-01-01T00:00:00.000Z", decisionAcknowledgedAt: "2026-01-01T00:00:01.000Z" }); }
