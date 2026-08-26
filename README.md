@@ -228,6 +228,13 @@ calls Git, changes a repository, retries an ambiguous decision, merges, or pushe
 4B decision. `CHANGES_REQUESTED` is transported and validated but not executed; `SHIP` is recorded but
 does not merge anything.
 
+Phase 4C retains one safe, memory-only execution record after a reviewed change is reserved, consumed,
+completed, cancelled, fails, or is superseded. The record keeps correlation IDs, reviewed Git identity,
+instruction integrity metadata, execution lifecycle state, and safe terminal delivery evidence; it never
+persists tokens, paths, remote URLs, prompts, or session content. Starting a replacement envelope delivery
+immediately closes the prior review correlation and makes its candidate non-executable. A failed or
+ambiguous replacement never resurrects the prior candidate or replays an execution.
+
 `aiflow.getLatestBrowserReviewDecision` is an internal retrieval command. **Aiflow: Show Latest Browser
 Review Decision** shows bounded IDs, verdict, optional model/reasoning, instruction presence, and
 acknowledgement state. It writes the exact instruction only to **Aiflow Browser Bridge** Output after the

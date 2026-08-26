@@ -13,6 +13,13 @@ export interface BrowserReviewExecutionCandidate {
   modelRole: ModelRole; reasoningEffort: ReasoningEffort; codexInstruction: string;
   reviewedAt: string; decisionAcknowledgedAt: string; instructionUtf8Bytes: number; instructionSha256: string;
 }
+export type BrowserReviewExecutionState = "available" | "confirmation_cancelled" | "reserved" | "running" | "completed" | "failed" | "cancelled" | "execution_error" | "superseded";
+export interface BrowserReviewExecutionRecord extends BrowserReviewExecutionCandidate {
+  repository: string; branch: string; reviewedHeadSha: string; candidateState: BrowserReviewCandidateState;
+  executionRunId?: string; executionState: BrowserReviewExecutionState; startedAt?: string; finishedAt?: string;
+  codexOutcome?: "completed" | "failed" | "cancelled"; gitDeliveryStatus?: string; resultHeadSha?: string; pushVerified?: boolean;
+  resultAvailableForBrowserDelivery: boolean; failureCode?: string; failureMessage?: string;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA = /^[0-9a-f]{64}$/;
 const OBJECT = /^[0-9a-f]{40,64}$/i;
@@ -27,6 +34,8 @@ export interface BrowserReviewCandidateProvider {
   reserveExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): BrowserReviewExecutionCandidate | null;
   consumeExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): boolean;
   getExecutionCandidateState(): BrowserReviewCandidateState;
+  getLatestExecutionRecord(): BrowserReviewExecutionRecord | null;
+  markExecutionRecord(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">, patch: Partial<BrowserReviewExecutionRecord>): void;
 }
 export interface BrowserReviewExecutionService {
   snapshot(workspacePath: string): Promise<GitPreflight>;
@@ -55,29 +64,38 @@ export class BrowserReviewExecutionController {
       throw this.fail("Reviewed repository state no longer matches the browser decision");
     }
     this.writeInstruction(candidate);
-    if (!(await this.ui.confirmReviewedChange({ ...candidate, modelId: modelIdForRole(candidate.modelRole) }))) return undefined;
+    if (!(await this.ui.confirmReviewedChange({ ...candidate, modelId: modelIdForRole(candidate.modelRole) }))) {
+      this.candidates.markExecutionRecord(pick(candidate), { executionState: "confirmation_cancelled" }); return undefined;
+    }
     const key = pick(candidate);
     const reserved = this.candidates.reserveExecutionCandidate(key);
     if (!reserved) throw this.fail("Browser review decision is stale or has already been used");
     // Consumption happens before invocation: an ambiguous/cancelled real turn is never replayed.
     if (!this.candidates.consumeExecutionCandidate(key)) throw this.fail("Browser review decision could not be consumed");
     const runId = this.uuid();
-    const result = await this.service.run({ runId, workspacePath, prompt: reserved.codexInstruction,
-      modelRole: reserved.modelRole, reasoningEffort: reserved.reasoningEffort,
-      expectedGitHubRepository: reserved.reviewedRepository, expectedBranch: reserved.reviewedBranch, expectedBaseSha: reserved.reviewedHeadSha });
-    this.results.replace(result);
-    this.logger?.log(result);
-    if (!this.logger) this.log(result);
-    return result;
+    if (!UUID.test(runId)) throw this.fail("Browser review execution ID is invalid");
+    this.candidates.markExecutionRecord(key, { candidateState: "consumed", executionRunId: runId, executionState: "running", startedAt: new Date().toISOString() });
+    try {
+      const result = await this.service.run({ runId, workspacePath, prompt: reserved.codexInstruction,
+        modelRole: reserved.modelRole, reasoningEffort: reserved.reasoningEffort,
+        expectedGitHubRepository: reserved.reviewedRepository, expectedBranch: reserved.reviewedBranch, expectedBaseSha: reserved.reviewedHeadSha });
+      this.results.replace(result);
+      this.logger?.log(result); if (!this.logger) this.log(result);
+      this.candidates.markExecutionRecord(key, { executionState: result.codex.outcome === "completed" ? "completed" : result.codex.outcome === "cancelled" ? "cancelled" : "failed", finishedAt: new Date().toISOString(), codexOutcome: result.codex.outcome, gitDeliveryStatus: result.deliveryStatus, resultHeadSha: result.git.headSha, pushVerified: result.git.pushVerified, resultAvailableForBrowserDelivery: true });
+      return result;
+    } catch (error) {
+      this.candidates.markExecutionRecord(key, { executionState: "execution_error", finishedAt: new Date().toISOString(), failureCode: "EXECUTION_FAILED", failureMessage: bounded(error), resultAvailableForBrowserDelivery: false });
+      throw this.fail(`Reviewed execution failed: ${bounded(error)}`);
+    }
   }
 
   show(): void {
-    const candidate = this.candidates.getExecutionCandidate();
-    const state = this.candidates.getExecutionCandidateState();
-    if (!candidate) { const summary = `Browser review execution: ${state}`; this.ui.appendOutput(summary); this.ui.showInformation?.(`Aiflow Browser Bridge: ${summary}`); return; }
-    this.writeInstruction(candidate);
-    this.ui.appendOutput(`Browser review execution: request=${candidate.requestId}; source=${candidate.sourceRunId}; state=${state}; repository=${candidate.reviewedRepository}; branch=${candidate.reviewedBranch}; reviewed SHA=${candidate.reviewedHeadSha}; model=${candidate.modelRole}; reasoning=${candidate.reasoningEffort}; instruction bytes=${candidate.instructionUtf8Bytes}; instruction SHA-256=${candidate.instructionSha256}`);
-    this.ui.showInformation?.(`Aiflow Browser Bridge: request=${candidate.requestId}; state=${state}; repository=${candidate.reviewedRepository}; branch=${candidate.reviewedBranch}; SHA=${candidate.reviewedHeadSha}; model=${candidate.modelRole}; reasoning=${candidate.reasoningEffort}`);
+    const record = this.candidates.getLatestExecutionRecord();
+    if (!record) { const summary = "Browser review execution: no available record"; this.ui.appendOutput(summary); this.ui.showInformation?.(`Aiflow Browser Bridge: ${summary}`); return; }
+    validateBrowserReviewExecutionCandidate(record); this.writeInstruction(record);
+    const available = record.executionRunId === this.results.get()?.runId;
+    const summary = `Browser review execution: request=${record.requestId}; source=${record.sourceRunId}; execution=${record.executionRunId ?? "<none>"}; state=${record.executionState}; candidate=${record.candidateState}; repository=${record.repository}; branch=${record.branch}; reviewed SHA=${record.reviewedHeadSha}; result available=${available}`;
+    this.ui.appendOutput(summary); this.ui.showInformation?.(`Aiflow Browser Bridge: ${summary.slice(0, 300)}`);
   }
   private writeInstruction(candidate: BrowserReviewExecutionCandidate): void { this.ui.appendOutput("--- Browser Review Codex Instruction (user-requested display) ---"); this.ui.appendOutput(candidate.codexInstruction); this.ui.appendOutput("--- End Browser Review Codex Instruction ---"); }
   private log(result: GitImplementationRunResult): void { this.ui.appendOutput(`review execution result: run=${result.runId}; repository=${result.git.githubRepository}; branch=${result.git.branch}; head=${result.git.headSha}; Codex=${result.codex.outcome}; delivery=${result.deliveryStatus}; push verified=${result.git.pushVerified}`); }
@@ -90,3 +108,4 @@ export function createExecutionCandidate(value: Omit<BrowserReviewExecutionCandi
 }
 function utc(value: unknown): boolean { if (typeof value !== "string") return false; const date = new Date(value); return !Number.isNaN(date.getTime()) && date.toISOString() === value && value.endsWith("Z"); }
 function pick(candidate: BrowserReviewExecutionCandidate) { return { requestId: candidate.requestId, envelopeSha256: candidate.envelopeSha256, decisionSha256: candidate.decisionSha256 }; }
+function bounded(error: unknown): string { return String(error instanceof Error ? error.message : error).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").slice(0, 300); }

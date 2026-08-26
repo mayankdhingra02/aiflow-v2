@@ -22,7 +22,7 @@ import {
   type ChatGPTReviewDecisionV1,
   type ChatGPTReviewRequestV1,
 } from "./reviewHandoffContracts";
-import { createExecutionCandidate, type BrowserReviewCandidateProvider, type BrowserReviewCandidateState, type BrowserReviewExecutionCandidate } from "./browserReviewExecution";
+import { createExecutionCandidate, validateBrowserReviewExecutionCandidate, type BrowserReviewCandidateProvider, type BrowserReviewCandidateState, type BrowserReviewExecutionCandidate, type BrowserReviewExecutionRecord } from "./browserReviewExecution";
 
 const PAIRING_CODE_TTL_MS = 5 * 60_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -89,6 +89,7 @@ interface PendingDelivery {
   resolve: (value: BrowserReviewDeliveryResult) => void;
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
+  generation: number;
 }
 
 export class BrowserBridge implements BrowserReviewCandidateProvider {
@@ -102,8 +103,9 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
   private latestReviewRequest: Pick<ChatGPTReviewRequestV1, "requestId" | "runId" | "envelopeSha256"> | null = null;
   private latestReviewDecision: BrowserReviewDecisionResult | null = null;
   private executionCandidate: BrowserReviewExecutionCandidate | null = null;
-  private latestExecutionRecord: BrowserReviewExecutionCandidate | null = null;
+  private latestExecutionRecord: BrowserReviewExecutionRecord | null = null;
   private executionCandidateState: BrowserReviewCandidateState = "unavailable";
+  private deliveryGeneration = 0;
   private latestTestPrompt: BrowserBridgeStatus["latestTestPrompt"] = null;
   private pairedExtensionId: string | null = null;
   private readonly trackedSockets = new Set<ConnectedSocket>();
@@ -151,7 +153,8 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
       throw new Error("Browser bridge already has a pending review delivery");
     }
     const envelopeSha256 = reviewEnvelopeSha256(envelope);
-    this.invalidateExecutableCandidate();
+    const generation = ++this.deliveryGeneration;
+    this.closeReviewCorrelationForReplacement();
     const message = createBrowserBridgeMessage("implementation_review_envelope", envelope, () => this.now());
     const timeoutMs = this.options.acknowledgementTimeoutMs ?? BROWSER_BRIDGE_ACK_TIMEOUT_MS;
     const result = new Promise<BrowserReviewDeliveryResult>((resolve, reject) => {
@@ -159,7 +162,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
         this.pendingDelivery = null;
         reject(new Error("Timed out waiting for browser review acknowledgement"));
       }, timeoutMs);
-      this.pendingDelivery = { messageId: message.id, runId: envelope.runId, envelopeSha256, envelope: cloneEnvelope(envelope), resolve, reject, timeout };
+      this.pendingDelivery = { messageId: message.id, runId: envelope.runId, envelopeSha256, envelope: cloneEnvelope(envelope), resolve, reject, timeout, generation };
     });
     try {
       this.send(client.socket, message);
@@ -194,24 +197,31 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
   }
 
   getExecutionCandidate(): BrowserReviewExecutionCandidate | null {
-    return this.executionCandidateState === "available" && this.executionCandidate ? { ...this.executionCandidate } : null;
+    if (this.executionCandidateState !== "available" || !this.executionCandidate) return null;
+    validateBrowserReviewExecutionCandidate(this.executionCandidate); return { ...this.executionCandidate };
   }
-  getLatestExecutionRecord(): BrowserReviewExecutionCandidate | null { return this.latestExecutionRecord ? { ...this.latestExecutionRecord } : null; }
+  getLatestExecutionRecord(): BrowserReviewExecutionRecord | null { if (!this.latestExecutionRecord) return null; validateBrowserReviewExecutionCandidate(this.latestExecutionRecord); return { ...this.latestExecutionRecord }; }
 
   getExecutionCandidateState(): BrowserReviewCandidateState { return this.executionCandidateState; }
 
   reserveExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): BrowserReviewExecutionCandidate | null {
     if (this.executionCandidateState !== "available" || !this.executionCandidate || !sameCandidate(key, this.executionCandidate)) return null;
+    validateBrowserReviewExecutionCandidate(this.executionCandidate);
     this.executionCandidateState = "reserved";
-    this.latestExecutionRecord = { ...this.executionCandidate };
+    this.updateExecutionRecord({ candidateState: "reserved", executionState: "reserved" });
     return { ...this.executionCandidate };
   }
 
   consumeExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): boolean {
     if (this.executionCandidateState !== "reserved" || !this.executionCandidate || !sameCandidate(key, this.executionCandidate)) return false;
+    validateBrowserReviewExecutionCandidate(this.executionCandidate);
     this.executionCandidateState = "consumed";
-    this.latestExecutionRecord = { ...this.executionCandidate };
+    this.updateExecutionRecord({ candidateState: "consumed" });
     return true;
+  }
+  markExecutionRecord(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">, patch: Partial<BrowserReviewExecutionRecord>): void {
+    if (!this.latestExecutionRecord || !sameCandidate(key, this.latestExecutionRecord)) return;
+    validateBrowserReviewExecutionCandidate(this.latestExecutionRecord); this.updateExecutionRecord(patch);
   }
 
   private async ensureListening(): Promise<void> {
@@ -364,6 +374,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
     }
     clearTimeout(pending.timeout);
     this.pendingDelivery = null;
+    if (pending.generation !== this.deliveryGeneration) return;
     const result = { bridgeMessageId: pending.messageId, runId: pending.runId, envelopeSha256: pending.envelopeSha256, acknowledgedAt: this.now().toISOString() };
     this.latestAcknowledgedDelivery = result;
     this.latestAcknowledgedEnvelope = cloneEnvelope(pending.envelope);
@@ -411,7 +422,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
         codexInstruction: decision.codexInstruction!, reviewedAt: decision.reviewedAt, decisionAcknowledgedAt: acknowledgedAt,
       });
       this.executionCandidateState = "available";
-      this.latestExecutionRecord = { ...this.executionCandidate };
+      this.latestExecutionRecord = recordFromCandidate(this.executionCandidate, "available", "available");
     }
     this.send(connection.socket, createBrowserBridgeMessage(
       "ack",
@@ -486,9 +497,17 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
     this.executionCandidateState = "unavailable";
   }
   private invalidateExecutableCandidate(): void {
-    if (this.executionCandidate) this.latestExecutionRecord = { ...this.executionCandidate };
+    if (this.executionCandidate) this.updateExecutionRecord({ candidateState: "unavailable", executionState: "superseded", resultAvailableForBrowserDelivery: false });
     this.executionCandidate = null;
     this.executionCandidateState = "unavailable";
+  }
+  private closeReviewCorrelationForReplacement(): void {
+    this.invalidateExecutableCandidate(); this.latestAcknowledgedDelivery = null; this.latestAcknowledgedEnvelope = null; this.latestReviewRequest = null; this.latestReviewDecision = null;
+  }
+  private updateExecutionRecord(patch: Partial<BrowserReviewExecutionRecord>): void {
+    if (!this.latestExecutionRecord) return;
+    validateBrowserReviewExecutionCandidate(this.latestExecutionRecord);
+    this.latestExecutionRecord = { ...this.latestExecutionRecord, ...patch };
   }
 
   private now(): Date { return (this.options.now ?? (() => new Date()))(); }
@@ -498,6 +517,10 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
 
 function cloneEnvelope(envelope: ImplementationReviewEnvelopeV1): ImplementationReviewEnvelopeV1 { return { ...envelope, commitShas: [...envelope.commitShas] }; }
 function sameCandidate(left: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">, right: BrowserReviewExecutionCandidate): boolean { return left.requestId === right.requestId && left.envelopeSha256 === right.envelopeSha256 && left.decisionSha256 === right.decisionSha256; }
+function recordFromCandidate(candidate: BrowserReviewExecutionCandidate, candidateState: BrowserReviewCandidateState, executionState: BrowserReviewExecutionRecord["executionState"]): BrowserReviewExecutionRecord {
+  validateBrowserReviewExecutionCandidate(candidate);
+  return { ...candidate, repository: candidate.reviewedRepository, branch: candidate.reviewedBranch, candidateState, executionState, resultAvailableForBrowserDelivery: false };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
