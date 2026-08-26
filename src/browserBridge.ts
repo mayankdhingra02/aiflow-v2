@@ -17,6 +17,7 @@ import {
 import { validateImplementationReviewEnvelope, type ImplementationReviewEnvelopeV1 } from "./gitImplementationContracts";
 
 const PAIRING_CODE_TTL_MS = 5 * 60_000;
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 const TOKEN_HASH_SECRET = "aiflow.browserBridge.browserTokenHash";
 const EXTENSION_ID_SECRET = "aiflow.browserBridge.extensionId";
 
@@ -33,6 +34,7 @@ export interface BrowserBridgeOptions {
   now?: () => Date;
   randomBytes?: (size: number) => Buffer;
   acknowledgementTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -62,6 +64,7 @@ interface ConnectedSocket {
   origin: string | undefined;
   authenticated: boolean;
   extensionId: string | null;
+  handshakeTimeout: NodeJS.Timeout | null;
 }
 
 interface PendingDelivery {
@@ -81,6 +84,7 @@ export class BrowserBridge {
   private pendingDelivery: PendingDelivery | null = null;
   private latestTestPrompt: BrowserBridgeStatus["latestTestPrompt"] = null;
   private pairedExtensionId: string | null = null;
+  private readonly trackedSockets = new Set<ConnectedSocket>();
 
   constructor(private readonly options: BrowserBridgeOptions) {}
 
@@ -97,6 +101,7 @@ export class BrowserBridge {
     await Promise.all([this.options.secrets.delete(TOKEN_HASH_SECRET), this.options.secrets.delete(EXTENSION_ID_SECRET)]);
     this.pairedExtensionId = null;
     this.closeAuthenticated(1008, "Pairing revoked");
+    this.closeUnauthenticatedSockets(1008, "Pairing revoked");
     this.log("bridge pairing revoked");
   }
 
@@ -144,6 +149,7 @@ export class BrowserBridge {
   async dispose(): Promise<void> {
     this.pairing = null;
     this.closeAuthenticated(1001, "Bridge stopped");
+    this.closeAllTrackedSockets();
     this.rejectPending(new Error("Browser bridge stopped"));
     const server = this.server;
     this.server = null;
@@ -179,11 +185,22 @@ export class BrowserBridge {
   }
 
   private onConnection(socket: WebSocket, origin: string | undefined): void {
-    const connection: ConnectedSocket = { socket, origin, authenticated: false, extensionId: null };
+    if (!extensionIdFromOrigin(origin)) {
+      socket.close(1008, "Browser bridge requires a Chrome extension Origin");
+      this.log("browser connection rejected: invalid Origin");
+      return;
+    }
+    const connection: ConnectedSocket = { socket, origin, authenticated: false, extensionId: null, handshakeTimeout: null };
+    this.trackedSockets.add(connection);
+    connection.handshakeTimeout = setTimeout(() => {
+      if (!connection.authenticated) this.rejectConnection(connection, "Browser bridge authentication timed out");
+    }, this.options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
     socket.on("message", (data, isBinary) => {
       void this.onMessage(connection, data, isBinary);
     });
     socket.on("close", () => {
+      this.clearHandshakeTimeout(connection);
+      this.trackedSockets.delete(connection);
       if (this.authenticated?.socket === socket) {
         this.authenticated = null;
         this.rejectPending(new Error("Authenticated browser disconnected"));
@@ -252,6 +269,7 @@ export class BrowserBridge {
     }
     connection.authenticated = true;
     connection.extensionId = extensionId;
+    this.clearHandshakeTimeout(connection);
     this.authenticated = connection;
     this.send(connection.socket, createBrowserBridgeMessage("authenticated", { extensionId }, () => this.now(), message.id));
     this.log(`browser authenticated: extension=${extensionId}`);
@@ -300,6 +318,7 @@ export class BrowserBridge {
   }
 
   private rejectConnection(connection: ConnectedSocket, message: string): void {
+    this.clearHandshakeTimeout(connection);
     this.sendError(connection.socket, createBrowserBridgeMessage("error", {}, () => this.now()).id, message);
     connection.socket.close(1008, "Bridge authentication or protocol rejected");
   }
@@ -308,6 +327,29 @@ export class BrowserBridge {
     const current = this.authenticated;
     this.authenticated = null;
     if (current && current.socket.readyState === WebSocket.OPEN) current.socket.close(code, reason);
+  }
+
+  private closeUnauthenticatedSockets(code: number, reason: string): void {
+    for (const connection of this.trackedSockets) {
+      if (!connection.authenticated && connection.socket.readyState === WebSocket.OPEN) {
+        this.clearHandshakeTimeout(connection);
+        connection.socket.close(code, reason);
+      }
+    }
+  }
+
+  private closeAllTrackedSockets(): void {
+    for (const connection of this.trackedSockets) {
+      this.clearHandshakeTimeout(connection);
+      try { connection.socket.terminate(); } catch { connection.socket.close(1001, "Bridge stopped"); }
+    }
+    this.trackedSockets.clear();
+  }
+
+  private clearHandshakeTimeout(connection: ConnectedSocket): void {
+    if (!connection.handshakeTimeout) return;
+    clearTimeout(connection.handshakeTimeout);
+    connection.handshakeTimeout = null;
   }
 
   private rejectPending(error: Error): void {
@@ -335,4 +377,9 @@ function safeEquals(left: string, right: string): boolean {
   const a = Buffer.from(left, "utf8");
   const b = Buffer.from(right, "utf8");
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function extensionIdFromOrigin(origin: string | undefined): string | null {
+  const match = /^chrome-extension:\/\/([a-p]{32})$/.exec(origin ?? "");
+  return match?.[1] ?? null;
 }

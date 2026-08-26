@@ -26,6 +26,27 @@ test("browser bridge server factory receives only the loopback bind address", as
   } finally { await bridge.dispose(); }
 });
 
+test("server rejects invalid Origins, expires unauthenticated sockets, and terminates tracked sockets on disposal", async () => {
+  const bridge = new BrowserBridge({
+    port: () => 47_323,
+    secrets: new MemorySecrets(),
+    handshakeTimeoutMs: 1,
+    serverFactory: () => new FakeServer(47_323) as unknown as WebSocketServer,
+  });
+  await bridge.beginPairing();
+  const invalid = new EventedSocket();
+  (bridge as any).onConnection(invalid, "https://example.com");
+  assert.equal(invalid.closed, true);
+  const idle = new EventedSocket();
+  (bridge as any).onConnection(idle, `chrome-extension://${EXTENSION_ID}`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(idle.closed, true);
+  const tracked = new EventedSocket();
+  (bridge as any).onConnection(tracked, `chrome-extension://${EXTENSION_ID}`);
+  await bridge.dispose();
+  assert.equal(tracked.terminated, true);
+});
+
 test("pairing is single-use, persists only a token hash, and requires the extension Origin", async () => {
   await withBridge(async ({ bridge, secrets, now }) => {
     const pairing = await bridge.beginPairing();
@@ -160,6 +181,15 @@ class FakeSocket {
   closed = false;
   send(value: string) { this.sent.push(value); }
   close() { this.closed = true; this.readyState = WebSocket.CLOSED; }
+}
+
+class EventedSocket extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+  closed = false;
+  terminated = false;
+  send() {}
+  close() { this.closed = true; this.readyState = WebSocket.CLOSED; this.emit("close"); }
+  terminate() { this.terminated = true; this.close(); }
 }
 
 function syntheticEnvelope(): ImplementationReviewEnvelopeV1 {
