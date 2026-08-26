@@ -1,4 +1,5 @@
 import { BrowserBridgeClient } from "./client.mjs";
+import { createBrowserRuntimeTimers } from "./runtime.mjs";
 
 const client = new BrowserBridgeClient({
   WebSocket,
@@ -6,10 +7,7 @@ const client = new BrowserBridgeClient({
   storage: chrome.storage.local,
   now: () => new Date(),
   uuid: () => crypto.randomUUID(),
-  setTimeout,
-  clearTimeout,
-  setInterval,
-  clearInterval,
+  ...createBrowserRuntimeTimers(globalThis),
   notify: (event) => { void chrome.runtime.sendMessage(event).catch(() => undefined); },
 });
 

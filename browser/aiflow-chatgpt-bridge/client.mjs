@@ -199,7 +199,10 @@ export class BrowserBridgeClient {
   scheduleReconnect() {
     if (this.reconnectTimer || this.state === "blocked") return;
     const delay = Math.min(1_000 * (2 ** this.retry++), 10_000);
-    this.reconnectTimer = this.deps.setTimeout(async () => { this.reconnectTimer = null; await this.connect(); }, delay);
+    this.reconnectTimer = this.deps.setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connect().catch((error) => { void this.handleReconnectFailure(error); });
+    }, delay);
   }
 
   closeSocket(intentional) {
@@ -228,6 +231,15 @@ export class BrowserBridgeClient {
     await this.setState("disconnected", error);
     const stored = await this.settings();
     if (!stored.manualDisconnected && this.state !== "blocked") this.scheduleReconnect();
+  }
+  async handleReconnectFailure(error) {
+    try {
+      await this.setState("disconnected", error);
+      const stored = await this.settings();
+      if (!stored.manualDisconnected && this.state !== "blocked") this.scheduleReconnect();
+    } catch {
+      this.state = "disconnected";
+    }
   }
   async block(error) { this.closeSocket(true); return this.setState("blocked", error); }
   async setState(state, error) { this.state = state; return this.publish(error); }
