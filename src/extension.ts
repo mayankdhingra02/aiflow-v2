@@ -27,6 +27,9 @@ import { BrowserBridge } from "./browserBridge";
 import { resolveBrowserBridgePort } from "./browserBridgeProtocol";
 import { modelIdForRole } from "./officialCodexContracts";
 import type { ImplementationReviewEnvelopeV1 } from "./gitImplementationContracts";
+import { createImplementationReviewEnvelope, serializeImplementationReviewEnvelope } from "./gitImplementationContracts";
+import { LatestGitImplementationResultStore } from "./latestGitImplementationResult";
+import { BrowserReviewExecutionController, type BrowserReviewExecutionCandidate } from "./browserReviewExecution";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Aiflow Official Codex Worker");
@@ -63,10 +66,15 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const commandUi = createVscodeCommandUi(output, workspaceResolver);
   const commands = new OfficialCodexCommandController(service, commandUi);
+  const gitService = new GitImplementationService(service, undefined, createWorkspaceAuthorizer(workspaceResolver));
+  const latestGitResult = new LatestGitImplementationResultStore();
   const gitCommands = new GitImplementationCommandController(
-    new GitImplementationService(service, undefined, createWorkspaceAuthorizer(workspaceResolver)),
+    gitService,
     createVscodeGitImplementationCommandUi(commandUi, output),
+    latestGitResult,
   );
+  const reviewExecution = new BrowserReviewExecutionController(browserBridge, gitService, latestGitResult,
+    createVscodeBrowserReviewExecutionUi(commandUi, browserOutput), randomUUID);
   const probe = new ProbeController(commands);
 
   context.subscriptions.push(
@@ -87,6 +95,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("aiflow.runClipboardGitImplementation", () =>
       gitCommands.runClipboard(),
     ),
+    vscode.commands.registerCommand("aiflow.sendLatestGitResultToBrowserForReview", async () => {
+      const result = latestGitResult.get();
+      if (!result) throw new Error("No latest Git implementation result is available");
+      const envelope = createImplementationReviewEnvelope(result);
+      serializeImplementationReviewEnvelope(envelope); // validate deterministic form before the one delivery attempt
+      const delivery = await browserBridge.sendImplementationReviewEnvelope(envelope);
+      browserOutput.appendLine(`review delivery: run=${delivery.runId}; repository=${envelope.githubRepository}; branch=${envelope.branch}; head=${envelope.headSha}; sha256=${delivery.envelopeSha256}; acknowledged=${delivery.acknowledgedAt}`);
+    }),
+    vscode.commands.registerCommand("aiflow.runLatestBrowserReviewDecision", () => reviewExecution.run()),
+    vscode.commands.registerCommand("aiflow.showLatestBrowserReviewExecution", () => reviewExecution.show()),
     vscode.commands.registerCommand("aiflow.cancelActiveOfficialCodexRun", () =>
       commands.cancelActiveRun(),
     ),
@@ -179,6 +197,36 @@ function createVscodeGitImplementationCommandUi(
       return confirmation === "Run";
     },
     appendOutput: (message) => output.appendLine(message),
+  };
+}
+
+function createVscodeBrowserReviewExecutionUi(
+  base: OfficialCodexCommandUi,
+  output: vscode.OutputChannel,
+) {
+  return {
+    getOpenCanonicalWorkspace: base.getOpenCanonicalWorkspace,
+    appendOutput: (message: string) => output.appendLine(message),
+    showError: (message: string) => { void vscode.window.showErrorMessage(message); },
+    async confirmReviewedChange(details: BrowserReviewExecutionCandidate & { modelId: string }) {
+      const choice = await vscode.window.showWarningMessage([
+        "Run acknowledged browser review decision?",
+        `Review request ID: ${details.requestId}`,
+        `Source implementation run ID: ${details.sourceRunId}`,
+        `Repository: ${details.reviewedRepository}`,
+        `Branch: ${details.reviewedBranch}`,
+        `Reviewed base/head SHA: ${details.reviewedHeadSha}`,
+        `Decision SHA-256: ${details.decisionSha256}`,
+        `Model: ${details.modelRole} (${details.modelId})`,
+        `Reasoning: ${details.reasoningEffort}`,
+        `Exact instruction UTF-8 bytes: ${details.instructionUtf8Bytes}`,
+        `Exact instruction SHA-256: ${details.instructionSha256}`,
+        "The exact instruction is visible in Aiflow Browser Bridge Output.",
+        "Aiflow will verify Git delivery but will not itself commit or push.",
+        "This decision can be executed only once and will not be replayed automatically.",
+      ].join("\n"), { modal: true }, "Run Reviewed Change");
+      return choice === "Run Reviewed Change";
+    },
   };
 }
 

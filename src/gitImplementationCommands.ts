@@ -10,6 +10,7 @@ import {
 import type { GitPreflight } from "./gitInspection";
 import { modelIdForRole, promptByteLength, validatePrompt, type ModelRole, type ReasoningEffort } from "./officialCodexContracts";
 import { boundedText, type OfficialCodexCommandUi } from "./officialCodexCommands";
+import type { LatestGitImplementationResultStore } from "./latestGitImplementationResult";
 
 export interface GitImplementationRunService {
   snapshot(workspacePath: string): Promise<GitPreflight>;
@@ -31,12 +32,13 @@ export interface GitImplementationConfirmation {
 }
 
 export class GitImplementationCommandController {
-  constructor(private readonly service: GitImplementationRunService, private readonly ui: GitImplementationCommandUi) {}
+  constructor(private readonly service: GitImplementationRunService, private readonly ui: GitImplementationCommandUi, private readonly resultSink?: LatestGitImplementationResultStore) {}
 
   async runProgrammatic(argument: unknown): Promise<GitImplementationRunResult> {
     try {
       validateGitImplementationRunRequest(argument);
       const result = await this.service.run(argument);
+      this.resultSink?.replace(result);
       this.log(result);
       return result;
     } catch (error) {
@@ -70,6 +72,7 @@ export class GitImplementationCommandController {
         expectedBranch: snapshot.branch,
         expectedBaseSha: snapshot.baseSha,
       });
+      this.resultSink?.replace(result);
       this.log(result);
       return result;
     } catch (error) {

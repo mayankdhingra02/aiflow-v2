@@ -347,3 +347,24 @@ envelope naming the same repository and head SHA. In a second run, use the exist
 and verify it still targets only one exact turn. This integration is private and version-specific to
 the pinned official Codex extension; the original preflight upstream branch remains the only verified
 destination. Do not run live turns or GitHub network calls in automated tests.
+
+## Phase 4C confirmed browser review execution
+
+A validated `CHANGES_REQUESTED` browser decision is inert until the user runs **Aiflow: Run Latest
+Browser Review Decision** in VS Code. `SHIP` is never executable. Before a modal confirmation, Aiflow
+revalidates the single canonical workspace, conservative repository identity, exact branch, and reviewed
+head SHA using the existing clean-worktree, upstream, repository-root, and detached-HEAD protections.
+The modal identifies the exact model, reasoning effort, UTF-8 instruction byte count, and instruction SHA-256.
+On **Run Reviewed Change**, the exact validated instruction is used byte-for-byte and the decision is consumed
+before the one shared Git implementation run begins; it is never automatically replayed.
+
+The resulting Git run is retained only in memory. **Aiflow: Send Latest Git Result to Browser for Review** is a
+separate, one-attempt explicit command that waits for correlated browser acknowledgement. Phase 4C does not access,
+automate, or interact with ChatGPT Web.
+
+Manual acceptance (not automated): pair the bridge in a clean disposable GitHub repository; run a harmless
+clipboard implementation that commits and pushes; explicitly send its result; manually obtain and paste a
+correlated `CHANGES_REQUESTED` response; confirm receipt starts no Codex turn; invoke the run command and verify
+the modal metadata; choose **Run Reviewed Change** and require one exact turn, one new commit, a clean worktree,
+and verified remote delivery. A second invocation must reject with zero new turns. Explicitly send the follow-up
+result, then test `SHIP` and require zero turns. Confirm no ChatGPT page access and no automatic review/execution loop.

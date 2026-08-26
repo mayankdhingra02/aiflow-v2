@@ -24,6 +24,9 @@
     "onCommand:aiflow.showBrowserBridgeStatus",
     "onCommand:aiflow.sendSyntheticReviewEnvelope",
     "onCommand:aiflow.showLatestBrowserReviewDecision"
+    ,"onCommand:aiflow.sendLatestGitResultToBrowserForReview"
+    ,"onCommand:aiflow.runLatestBrowserReviewDecision"
+    ,"onCommand:aiflow.showLatestBrowserReviewExecution"
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
@@ -69,6 +72,18 @@
       {
         "command": "aiflow.showLatestBrowserReviewDecision",
         "title": "Aiflow: Show Latest Browser Review Decision"
+      },
+      {
+        "command": "aiflow.sendLatestGitResultToBrowserForReview",
+        "title": "Aiflow: Send Latest Git Result to Browser for Review"
+      },
+      {
+        "command": "aiflow.runLatestBrowserReviewDecision",
+        "title": "Aiflow: Run Latest Browser Review Decision"
+      },
+      {
+        "command": "aiflow.showLatestBrowserReviewExecution",
+        "title": "Aiflow: Show Latest Browser Review Execution"
       }
     ],
     "configuration": {
