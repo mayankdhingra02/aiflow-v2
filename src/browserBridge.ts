@@ -102,6 +102,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
   private latestReviewRequest: Pick<ChatGPTReviewRequestV1, "requestId" | "runId" | "envelopeSha256"> | null = null;
   private latestReviewDecision: BrowserReviewDecisionResult | null = null;
   private executionCandidate: BrowserReviewExecutionCandidate | null = null;
+  private latestExecutionRecord: BrowserReviewExecutionCandidate | null = null;
   private executionCandidateState: BrowserReviewCandidateState = "unavailable";
   private latestTestPrompt: BrowserBridgeStatus["latestTestPrompt"] = null;
   private pairedExtensionId: string | null = null;
@@ -119,7 +120,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
 
   async revoke(): Promise<void> {
     this.pairing = null;
-    this.clearReviewExecution();
+    this.invalidateExecutableCandidate();
     await Promise.all([this.options.secrets.delete(TOKEN_HASH_SECRET), this.options.secrets.delete(EXTENSION_ID_SECRET)]);
     this.pairedExtensionId = null;
     this.closeAuthenticated(1008, "Pairing revoked");
@@ -150,7 +151,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
       throw new Error("Browser bridge already has a pending review delivery");
     }
     const envelopeSha256 = reviewEnvelopeSha256(envelope);
-    this.clearReviewExecution();
+    this.invalidateExecutableCandidate();
     const message = createBrowserBridgeMessage("implementation_review_envelope", envelope, () => this.now());
     const timeoutMs = this.options.acknowledgementTimeoutMs ?? BROWSER_BRIDGE_ACK_TIMEOUT_MS;
     const result = new Promise<BrowserReviewDeliveryResult>((resolve, reject) => {
@@ -195,18 +196,21 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
   getExecutionCandidate(): BrowserReviewExecutionCandidate | null {
     return this.executionCandidateState === "available" && this.executionCandidate ? { ...this.executionCandidate } : null;
   }
+  getLatestExecutionRecord(): BrowserReviewExecutionCandidate | null { return this.latestExecutionRecord ? { ...this.latestExecutionRecord } : null; }
 
   getExecutionCandidateState(): BrowserReviewCandidateState { return this.executionCandidateState; }
 
   reserveExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): BrowserReviewExecutionCandidate | null {
     if (this.executionCandidateState !== "available" || !this.executionCandidate || !sameCandidate(key, this.executionCandidate)) return null;
     this.executionCandidateState = "reserved";
+    this.latestExecutionRecord = { ...this.executionCandidate };
     return { ...this.executionCandidate };
   }
 
   consumeExecutionCandidate(key: Pick<BrowserReviewExecutionCandidate, "requestId" | "envelopeSha256" | "decisionSha256">): boolean {
     if (this.executionCandidateState !== "reserved" || !this.executionCandidate || !sameCandidate(key, this.executionCandidate)) return false;
     this.executionCandidateState = "consumed";
+    this.latestExecutionRecord = { ...this.executionCandidate };
     return true;
   }
 
@@ -407,6 +411,7 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
         codexInstruction: decision.codexInstruction!, reviewedAt: decision.reviewedAt, decisionAcknowledgedAt: acknowledgedAt,
       });
       this.executionCandidateState = "available";
+      this.latestExecutionRecord = { ...this.executionCandidate };
     }
     this.send(connection.socket, createBrowserBridgeMessage(
       "ack",
@@ -476,6 +481,12 @@ export class BrowserBridge implements BrowserReviewCandidateProvider {
     this.latestAcknowledgedEnvelope = null;
     this.latestReviewRequest = null;
     this.latestReviewDecision = null;
+    this.executionCandidate = null;
+    this.latestExecutionRecord = null;
+    this.executionCandidateState = "unavailable";
+  }
+  private invalidateExecutableCandidate(): void {
+    if (this.executionCandidate) this.latestExecutionRecord = { ...this.executionCandidate };
     this.executionCandidate = null;
     this.executionCandidateState = "unavailable";
   }

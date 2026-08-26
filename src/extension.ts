@@ -27,9 +27,10 @@ import { BrowserBridge } from "./browserBridge";
 import { resolveBrowserBridgePort } from "./browserBridgeProtocol";
 import { modelIdForRole } from "./officialCodexContracts";
 import type { ImplementationReviewEnvelopeV1 } from "./gitImplementationContracts";
-import { createImplementationReviewEnvelope, serializeImplementationReviewEnvelope } from "./gitImplementationContracts";
 import { LatestGitImplementationResultStore } from "./latestGitImplementationResult";
 import { BrowserReviewExecutionController, type BrowserReviewExecutionCandidate } from "./browserReviewExecution";
+import { LatestGitResultBrowserDeliveryController } from "./latestGitResultBrowserDelivery";
+import { GitImplementationResultLogger } from "./gitImplementationCommands";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Aiflow Official Codex Worker");
@@ -73,8 +74,12 @@ export function activate(context: vscode.ExtensionContext): void {
     createVscodeGitImplementationCommandUi(commandUi, output),
     latestGitResult,
   );
+  const gitResultLogger = new GitImplementationResultLogger(createVscodeGitImplementationCommandUi(commandUi, output));
   const reviewExecution = new BrowserReviewExecutionController(browserBridge, gitService, latestGitResult,
-    createVscodeBrowserReviewExecutionUi(commandUi, browserOutput), randomUUID);
+    createVscodeBrowserReviewExecutionUi(commandUi, browserOutput), randomUUID, gitResultLogger);
+  const resultDelivery = new LatestGitResultBrowserDeliveryController(latestGitResult, browserBridge, {
+    appendOutput: (message) => browserOutput.appendLine(message), showInformation: (message) => { void vscode.window.showInformationMessage(message); }, showError: (message) => { void vscode.window.showErrorMessage(message); },
+  });
   const probe = new ProbeController(commands);
 
   context.subscriptions.push(
@@ -95,14 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("aiflow.runClipboardGitImplementation", () =>
       gitCommands.runClipboard(),
     ),
-    vscode.commands.registerCommand("aiflow.sendLatestGitResultToBrowserForReview", async () => {
-      const result = latestGitResult.get();
-      if (!result) throw new Error("No latest Git implementation result is available");
-      const envelope = createImplementationReviewEnvelope(result);
-      serializeImplementationReviewEnvelope(envelope); // validate deterministic form before the one delivery attempt
-      const delivery = await browserBridge.sendImplementationReviewEnvelope(envelope);
-      browserOutput.appendLine(`review delivery: run=${delivery.runId}; repository=${envelope.githubRepository}; branch=${envelope.branch}; head=${envelope.headSha}; sha256=${delivery.envelopeSha256}; acknowledged=${delivery.acknowledgedAt}`);
-    }),
+    vscode.commands.registerCommand("aiflow.sendLatestGitResultToBrowserForReview", () => resultDelivery.send()),
     vscode.commands.registerCommand("aiflow.runLatestBrowserReviewDecision", () => reviewExecution.run()),
     vscode.commands.registerCommand("aiflow.showLatestBrowserReviewExecution", () => reviewExecution.show()),
     vscode.commands.registerCommand("aiflow.cancelActiveOfficialCodexRun", () =>
@@ -208,6 +206,7 @@ function createVscodeBrowserReviewExecutionUi(
     getOpenCanonicalWorkspace: base.getOpenCanonicalWorkspace,
     appendOutput: (message: string) => output.appendLine(message),
     showError: (message: string) => { void vscode.window.showErrorMessage(message); },
+    showInformation: (message: string) => { void vscode.window.showInformationMessage(message); },
     async confirmReviewedChange(details: BrowserReviewExecutionCandidate & { modelId: string }) {
       const choice = await vscode.window.showWarningMessage([
         "Run acknowledged browser review decision?",

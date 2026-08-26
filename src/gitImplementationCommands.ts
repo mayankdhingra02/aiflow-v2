@@ -31,15 +31,32 @@ export interface GitImplementationConfirmation {
   promptBytes: number;
 }
 
+/** Shared bounded result output; callers own result storage. */
+export class GitImplementationResultLogger {
+  constructor(private readonly ui: Pick<GitImplementationCommandUi, "appendOutput">) {}
+  log(result: GitImplementationRunResult): void {
+    this.ui.appendOutput(`run ID: ${result.runId}`); this.ui.appendOutput(`GitHub repository: ${result.git.githubRepository}`);
+    this.ui.appendOutput(`branch: ${result.git.branch}`); this.ui.appendOutput(`base SHA: ${result.git.baseSha}`); this.ui.appendOutput(`head SHA: ${result.git.headSha}`);
+    this.ui.appendOutput(`created commits: ${result.git.commitShas.join(", ") || "<none>"}`); this.ui.appendOutput(`requested model: ${result.codex.requestedModelRole} (${result.codex.requestedModelId})`);
+    this.ui.appendOutput(`requested reasoning: ${result.codex.requestedReasoningEffort}`); this.ui.appendOutput(`recorded model: ${result.codex.recordedModelId ?? "<none>"}`);
+    this.ui.appendOutput(`recorded reasoning: ${result.codex.recordedReasoningEffort ?? "<none>"}`); this.ui.appendOutput(`Codex outcome: ${result.codex.outcome}`);
+    this.ui.appendOutput(`delivery status: ${result.deliveryStatus}`); this.ui.appendOutput(`working tree: ${result.git.workingTreeClean ? "clean" : "dirty"}`);
+    this.ui.appendOutput(`remote head SHA: ${result.git.remoteHeadSha ?? "<none>"}`); this.ui.appendOutput(`push verified: ${result.git.pushVerified}`);
+    this.ui.appendOutput(`conversation ID: ${result.codex.conversationId}`); this.ui.appendOutput(`turn ID: ${result.codex.turnId}`);
+    this.ui.appendOutput(`final response: ${boundedText(result.codex.finalResponse)}`); this.ui.appendOutput(`review envelope: ${serializeImplementationReviewEnvelope(createImplementationReviewEnvelope(result))}`);
+  }
+}
+
 export class GitImplementationCommandController {
-  constructor(private readonly service: GitImplementationRunService, private readonly ui: GitImplementationCommandUi, private readonly resultSink?: LatestGitImplementationResultStore) {}
+  private readonly logger: GitImplementationResultLogger;
+  constructor(private readonly service: GitImplementationRunService, private readonly ui: GitImplementationCommandUi, private readonly resultSink?: LatestGitImplementationResultStore, logger?: GitImplementationResultLogger) { this.logger = logger ?? new GitImplementationResultLogger(ui); }
 
   async runProgrammatic(argument: unknown): Promise<GitImplementationRunResult> {
     try {
       validateGitImplementationRunRequest(argument);
       const result = await this.service.run(argument);
       this.resultSink?.replace(result);
-      this.log(result);
+      this.logger.log(result);
       return result;
     } catch (error) {
       throw this.report(error, "INVALID_REQUEST", "Git implementation request is invalid");
@@ -73,33 +90,11 @@ export class GitImplementationCommandController {
         expectedBaseSha: snapshot.baseSha,
       });
       this.resultSink?.replace(result);
-      this.log(result);
+      this.logger.log(result);
       return result;
     } catch (error) {
       throw this.report(error, "INVALID_REQUEST", "Git implementation request is invalid");
     }
-  }
-
-  private log(result: GitImplementationRunResult): void {
-    this.ui.appendOutput(`run ID: ${result.runId}`);
-    this.ui.appendOutput(`GitHub repository: ${result.git.githubRepository}`);
-    this.ui.appendOutput(`branch: ${result.git.branch}`);
-    this.ui.appendOutput(`base SHA: ${result.git.baseSha}`);
-    this.ui.appendOutput(`head SHA: ${result.git.headSha}`);
-    this.ui.appendOutput(`created commits: ${result.git.commitShas.join(", ") || "<none>"}`);
-    this.ui.appendOutput(`requested model: ${result.codex.requestedModelRole} (${result.codex.requestedModelId})`);
-    this.ui.appendOutput(`requested reasoning: ${result.codex.requestedReasoningEffort}`);
-    this.ui.appendOutput(`recorded model: ${result.codex.recordedModelId ?? "<none>"}`);
-    this.ui.appendOutput(`recorded reasoning: ${result.codex.recordedReasoningEffort ?? "<none>"}`);
-    this.ui.appendOutput(`Codex outcome: ${result.codex.outcome}`);
-    this.ui.appendOutput(`delivery status: ${result.deliveryStatus}`);
-    this.ui.appendOutput(`working tree: ${result.git.workingTreeClean ? "clean" : "dirty"}`);
-    this.ui.appendOutput(`remote head SHA: ${result.git.remoteHeadSha ?? "<none>"}`);
-    this.ui.appendOutput(`push verified: ${result.git.pushVerified}`);
-    this.ui.appendOutput(`conversation ID: ${result.codex.conversationId}`);
-    this.ui.appendOutput(`turn ID: ${result.codex.turnId}`);
-    this.ui.appendOutput(`final response: ${boundedText(result.codex.finalResponse)}`);
-    this.ui.appendOutput(`review envelope: ${serializeImplementationReviewEnvelope(createImplementationReviewEnvelope(result))}`);
   }
 
   private report(
