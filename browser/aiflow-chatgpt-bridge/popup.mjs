@@ -1,11 +1,19 @@
 import { browserTestPromptPayload } from "./protocol.mjs";
+import { createReviewPopupActions, runtimeMessage, sanitizePopupState } from "./popupRuntime.mjs";
 
 const $ = (id) => document.getElementById(id);
-const send = (request) => chrome.runtime.sendMessage(request);
+const send = (request, validate) => runtimeMessage((message) => chrome.runtime.sendMessage(message), request, validate);
+const reviewActions = createReviewPopupActions({
+  sendMessage: (request) => chrome.runtime.sendMessage(request),
+  writeClipboard: (text) => navigator.clipboard.writeText(text),
+  getPastedResponse: () => $("reviewResponse").value,
+  clearPastedResponse: () => { $("reviewResponse").value = ""; },
+  setStatus: (text) => { $("reviewStatus").textContent = text; },
+});
 
 async function render() {
   await send({ action: "restore" });
-  renderState(await send({ action: "status" }));
+  renderState(sanitizePopupState(await send({ action: "status" })));
 }
 
 function renderState(state) {
@@ -27,21 +35,7 @@ $("connect").addEventListener("click", async () => { const state = await send({ 
 $("revoke").addEventListener("click", async () => { await send({ action: "revoke" }); await render(); });
 $("prompt").addEventListener("input", async () => { try { const payload = await browserTestPromptPayload($("prompt").value); $("metrics").textContent = `${payload.utf8Bytes} UTF-8 bytes · ${payload.sha256}`; } catch (error) { $("metrics").textContent = error.message; } });
 $("sendPrompt").addEventListener("click", async () => { const acknowledgement = await send({ action: "sendPrompt", text: $("prompt").value }); $("metrics").textContent = `Acknowledged: ${acknowledgement.utf8Bytes} UTF-8 bytes · ${acknowledgement.sha256}`; $("prompt").value = ""; await render(); });
-$("copyReviewRequest").addEventListener("click", async () => {
-  try {
-    const request = await send({ action: "createReviewRequest" });
-    await navigator.clipboard.writeText(request);
-    $("reviewStatus").textContent = "Review request copied. Paste it manually into ChatGPT.";
-    await render();
-  } catch (error) { $("reviewStatus").textContent = `Copy unavailable: ${String(error?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 200)}`; }
-});
-$("sendReviewDecision").addEventListener("click", async () => {
-  try {
-    const acknowledgement = await send({ action: "sendReviewDecision", text: $("reviewResponse").value });
-    $("reviewResponse").value = "";
-    $("reviewStatus").textContent = `Accepted ${acknowledgement.verdict} · acknowledged ${acknowledgement.acknowledgedAt}`;
-    await render();
-  } catch (error) { $("reviewStatus").textContent = `Review rejected: ${String(error?.message ?? error).replace(/[\r\n\t]+/g, " ").slice(0, 200)}`; }
-});
-chrome.runtime.onMessage.addListener((event) => { if (event?.type === "bridge_state") renderState(event.state); });
+$("copyReviewRequest").addEventListener("click", async () => { if (await reviewActions.copyReviewRequest()) await render(); });
+$("sendReviewDecision").addEventListener("click", async () => { if (await reviewActions.sendReviewDecision()) await render(); });
+chrome.runtime.onMessage.addListener((event) => { if (event?.type === "bridge_state") { try { renderState(sanitizePopupState(event.state)); } catch { $("reviewStatus").textContent = "Browser bridge returned an invalid popup state"; } } });
 void render();

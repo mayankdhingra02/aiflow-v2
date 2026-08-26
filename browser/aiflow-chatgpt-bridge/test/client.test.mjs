@@ -135,6 +135,89 @@ test("manual review handoff persists only safe metadata and requires correlated 
   assert.equal((await fixture.client.status()).browserToken, undefined);
 });
 
+test("protocol error messages immediately reject pending review operations and clear their timers", async () => {
+  const requestFixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+  await authenticate(requestFixture);
+  requestFixture.socket().message(wire("implementation_review_envelope", envelope()));
+  await waitFor(() => requestFixture.storage.values.latestEnvelope);
+  const pendingRequest = requestFixture.client.createReviewRequest();
+  await waitFor(() => requestFixture.client.reviewRequestAck);
+  requestFixture.socket().message(wire("error", {}));
+  await assert.rejects(pendingRequest, /rejected/);
+  assert.equal(requestFixture.client.reviewRequestAck, null);
+  assert.equal(requestFixture.timers.timeouts.size, 0);
+
+  const decisionFixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+  await authenticate(decisionFixture);
+  const delivered = envelope();
+  decisionFixture.socket().message(wire("implementation_review_envelope", delivered));
+  await waitFor(() => decisionFixture.storage.values.latestEnvelope);
+  const request = await acknowledgeReviewRequest(decisionFixture);
+  const pendingDecision = decisionFixture.client.sendReviewDecision(shipResponse(request));
+  await waitFor(() => decisionFixture.client.reviewDecisionAck);
+  decisionFixture.socket().message(wire("error", {}));
+  await assert.rejects(pendingDecision, /rejected/);
+  assert.equal(decisionFixture.client.reviewDecisionAck, null);
+  assert.equal(decisionFixture.timers.timeouts.size, 0);
+});
+
+test("review decision acknowledgements require every correlated field and never replay after timeout", async () => {
+  const mutations = [
+    (value) => ({ ...value, replyTo: "00000000-0000-4000-8000-000000000099" }),
+    (value) => ({ ...value, payload: { ...value.payload, requestId: "00000000-0000-4000-8000-000000000099" } }),
+    (value) => ({ ...value, payload: { ...value.payload, runId: "00000000-0000-4000-8000-000000000099" } }),
+    (value) => ({ ...value, payload: { ...value.payload, envelopeSha256: "0".repeat(64) } }),
+    (value) => ({ ...value, payload: { ...value.payload, verdict: "CHANGES_REQUESTED" } }),
+    (value) => ({ ...value, payload: { ...value.payload, decisionSha256: "0".repeat(64) } }),
+  ];
+  for (const mutate of mutations) {
+    const fixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+    await authenticate(fixture);
+    fixture.socket().message(wire("implementation_review_envelope", envelope()));
+    await waitFor(() => fixture.storage.values.latestEnvelope);
+    const request = await acknowledgeReviewRequest(fixture);
+    const pending = fixture.client.sendReviewDecision(shipResponse(request));
+    await waitFor(() => fixture.client.reviewDecisionAck);
+    const outbound = JSON.parse(fixture.socket().last());
+    const current = fixture.client.reviewDecisionAck;
+    const acknowledgement = { replyTo: outbound.id, payload: { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, verdict: "SHIP", decisionSha256: current.decisionSha256 } };
+    fixture.socket().message(wire("ack", mutate(acknowledgement).payload, mutate(acknowledgement).replyTo));
+    await assert.rejects(pending, /did not match/);
+  }
+  const timeout = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+  await authenticate(timeout);
+  timeout.socket().message(wire("implementation_review_envelope", envelope()));
+  await waitFor(() => timeout.storage.values.latestEnvelope);
+  const request = await acknowledgeReviewRequest(timeout);
+  const pending = timeout.client.sendReviewDecision(shipResponse(request));
+  await waitFor(() => timeout.client.reviewDecisionAck);
+  const sentBeforeTimeout = timeout.socket().sent.length;
+  timeout.timers.runTimeouts();
+  await assert.rejects(pending, /Timed out/);
+  assert.equal(timeout.socket().sent.length, sentBeforeTimeout);
+});
+
+test("duplicate decision metadata and oversized request serialization are rejected before WebSocket sends", async () => {
+  const duplicate = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+  await authenticate(duplicate);
+  duplicate.socket().message(wire("implementation_review_envelope", envelope()));
+  await waitFor(() => duplicate.storage.values.latestEnvelope);
+  const request = await acknowledgeReviewRequest(duplicate);
+  duplicate.storage.values.latestReviewDecision = { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, verdict: "SHIP", decisionSha256: "a".repeat(64), acknowledgedAt: "2026-08-26T12:00:00.000Z" };
+  const sentBeforeDuplicate = duplicate.socket().sent.length;
+  await assert.rejects(duplicate.client.sendReviewDecision(shipResponse(request)), /already has an acknowledged decision/);
+  assert.equal(duplicate.socket().sent.length, sentBeforeDuplicate);
+
+  const oversized = createClient({ extensionId: EXTENSION_ID, browserToken: "token" }, { serializeReviewRequest: () => { throw new Error("ChatGPT review request exceeds the bounded size"); } });
+  await authenticate(oversized);
+  oversized.socket().message(wire("implementation_review_envelope", envelope()));
+  await waitFor(() => oversized.storage.values.latestEnvelope);
+  await waitFor(() => JSON.parse(oversized.socket().last()).type === "ack");
+  const sentBeforeRequest = oversized.socket().sent.length;
+  await assert.rejects(oversized.client.createReviewRequest(), /exceeds the bounded size/);
+  assert.equal(oversized.socket().sent.length, sentBeforeRequest);
+});
+
 test("non-text and oversized frames, manual disconnect, duplicate connect, stale sockets, and notifications are controlled", async () => {
   const fixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
   await fixture.client.connect();
@@ -169,7 +252,19 @@ async function authenticate(fixture) {
   assert.equal((await fixture.client.status()).state, "authenticated");
 }
 
-function createClient(initial = {}) {
+async function acknowledgeReviewRequest(fixture) {
+  const pending = fixture.client.createReviewRequest();
+  await waitFor(() => fixture.client.reviewRequestAck);
+  const outgoing = JSON.parse(fixture.socket().last());
+  const request = outgoing.payload;
+  fixture.socket().message(wire("ack", { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256 }, outgoing.id));
+  await pending;
+  return request;
+}
+
+function shipResponse(request) { return ["# Implementation Review", `Request-ID: ${request.requestId}`, `Run-ID: ${request.runId}`, `Envelope-SHA256: ${request.envelopeSha256}`, "## Verdict", "SHIP"].join("\n"); }
+
+function createClient(initial = {}, overrides = {}) {
   const storage = new Storage(initial);
   const timers = new Timers();
   const sockets = [];
@@ -184,7 +279,7 @@ function createClient(initial = {}) {
     last() { return this.sent.at(-1); }
   }
   let id = 2;
-  const client = new BrowserBridgeClient({ WebSocket: FakeWebSocket, extensionId: EXTENSION_ID, storage, now: () => new Date("2026-08-26T12:00:00.000Z"), uuid: () => `00000000-0000-4000-8000-${String(id++).padStart(12, "0")}`, setTimeout: timers.setTimeout.bind(timers), clearTimeout: timers.clearTimeout.bind(timers), setInterval: timers.setInterval.bind(timers), clearInterval: timers.clearInterval.bind(timers), notify: (event) => events.push(event) });
+  const client = new BrowserBridgeClient({ WebSocket: FakeWebSocket, extensionId: EXTENSION_ID, storage, now: () => new Date("2026-08-26T12:00:00.000Z"), uuid: () => `00000000-0000-4000-8000-${String(id++).padStart(12, "0")}`, setTimeout: timers.setTimeout.bind(timers), clearTimeout: timers.clearTimeout.bind(timers), setInterval: timers.setInterval.bind(timers), clearInterval: timers.clearInterval.bind(timers), notify: (event) => events.push(event), ...overrides });
   const events = [];
   return { client, storage, timers, sockets, events, socket: () => sockets.at(-1) };
 }

@@ -87,14 +87,15 @@ export class BrowserBridgeClient {
     if (metadata && metadata.runId === envelope.runId && metadata.envelopeSha256 === envelopeSha256) {
       return serializeReviewRequest({ version: 1, ...metadata, implementationReviewEnvelope: envelope });
     }
-    const request = await createHandoffRequest(envelope, { now: this.deps.now, uuid: this.deps.uuid });
+    const request = await (this.deps.createReviewRequest ?? createHandoffRequest)(envelope, { now: this.deps.now, uuid: this.deps.uuid });
+    const serialized = (this.deps.serializeReviewRequest ?? serializeReviewRequest)(request);
     const outgoing = this.send("review_request", request);
     await new Promise((resolve, reject) => {
       const timeout = this.deps.setTimeout(() => this.rejectReviewRequestAck(new Error("Timed out waiting for review request acknowledgement")), ACK_TIMEOUT_MS);
       this.reviewRequestAck = { id: outgoing.id, request, resolve, reject, timeout };
     });
     await this.deps.storage.set({ latestReviewRequest: { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, createdAt: request.createdAt } });
-    return serializeReviewRequest(request);
+    return serialized;
   }
 
   async sendReviewDecision(raw) {
@@ -103,6 +104,9 @@ export class BrowserBridgeClient {
     const metadata = stored.latestReviewRequest;
     const envelope = validateReviewEnvelope(stored.latestEnvelope);
     if (!metadata || metadata.runId !== envelope.runId || metadata.envelopeSha256 !== await reviewEnvelopeDigest(envelope)) throw new Error("No current acknowledged review request is available");
+    if (stored.latestReviewDecision && stored.latestReviewDecision.requestId === metadata.requestId && stored.latestReviewDecision.runId === metadata.runId && stored.latestReviewDecision.envelopeSha256 === metadata.envelopeSha256) {
+      throw new Error("This review request already has an acknowledged decision");
+    }
     const request = { version: 1, ...metadata, implementationReviewEnvelope: envelope };
     const decision = parseReviewDecisionText(raw, request, this.deps.now);
     const decisionSha256 = await reviewDecisionDigest(decision);
@@ -290,10 +294,14 @@ export class BrowserBridgeClient {
     return outgoing;
   }
 
+  rejectPendingOperations(error) {
+    const rejected = error instanceof Error ? error : new Error("Browser protocol rejected");
+    this.rejectPromptAck(rejected);
+    this.rejectReviewRequestAck(rejected);
+    this.rejectReviewDecisionAck(rejected);
+  }
   async failProtocol(error) {
-    this.rejectPromptAck(error instanceof Error ? error : new Error("Browser protocol rejected"));
-    this.rejectReviewRequestAck(error instanceof Error ? error : new Error("Browser protocol rejected"));
-    this.rejectReviewDecisionAck(error instanceof Error ? error : new Error("Browser protocol rejected"));
+    this.rejectPendingOperations(error);
     this.closeSocket(false);
     await this.setState("disconnected", error);
     const stored = await this.settings();
@@ -308,7 +316,7 @@ export class BrowserBridgeClient {
       this.state = "disconnected";
     }
   }
-  async block(error) { this.closeSocket(true); return this.setState("blocked", error); }
+  async block(error) { this.rejectPendingOperations(error); this.closeSocket(true); return this.setState("blocked", error); }
   async setState(state, error) { this.state = state; return this.publish(error); }
   async publish(error) { const state = await this.status(); this.deps.notify({ type: "bridge_state", state, ...(error ? { error: bounded(error) } : {}) }); return state; }
   async settings() { return this.deps.storage.get({ port: DEFAULT_PORT, extensionId: null, browserToken: null, latestEnvelope: null, latestPromptAcknowledgement: null, latestReviewRequest: null, latestReviewDecision: null, manualDisconnected: false }); }
