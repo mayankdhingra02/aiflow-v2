@@ -108,6 +108,33 @@ test("review envelopes are accepted only while authenticated and only after full
   assert.equal(JSON.parse(authenticatedFixture.socket().last()).type, "ack");
 });
 
+test("manual review handoff persists only safe metadata and requires correlated acknowledgements", async () => {
+  const fixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
+  await authenticate(fixture);
+  const delivered = envelope();
+  fixture.socket().message(wire("implementation_review_envelope", delivered));
+  await waitFor(() => fixture.storage.values.latestEnvelope);
+  const requestPromise = fixture.client.createReviewRequest();
+  await waitFor(() => fixture.client.reviewRequestAck);
+  const requestWire = JSON.parse(fixture.socket().last());
+  const request = requestWire.payload;
+  fixture.socket().message(wire("ack", { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256 }, requestWire.id));
+  const copied = await requestPromise;
+  assert.match(copied, /Aiflow ChatGPT Review Request V1/);
+  assert.equal(JSON.stringify(fixture.storage.values).includes("Aiflow ChatGPT Review Request V1"), false);
+  const pasted = ["# Implementation Review", `Request-ID: ${request.requestId}`, `Run-ID: ${request.runId}`, `Envelope-SHA256: ${request.envelopeSha256}`, "## Verdict", "CHANGES_REQUESTED", "## Codex Execution", "Model: luna", "Reasoning: high", "## Codex Instruction", "Keep this exact Unicode line 🙂", "and this second line."].join("\n");
+  const decisionPromise = fixture.client.sendReviewDecision(pasted);
+  await waitFor(() => fixture.client.reviewDecisionAck);
+  const decisionWire = JSON.parse(fixture.socket().last());
+  const pending = fixture.client.reviewDecisionAck;
+  fixture.socket().message(wire("ack", { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, verdict: "CHANGES_REQUESTED", decisionSha256: pending.decisionSha256 }, decisionWire.id));
+  const acknowledgement = await decisionPromise;
+  assert.equal(acknowledgement.verdict, "CHANGES_REQUESTED");
+  assert.equal(fixture.storage.values.latestReviewDecision.codexInstruction, undefined);
+  assert.equal(JSON.stringify(fixture.storage.values).includes(pasted), false);
+  assert.equal((await fixture.client.status()).browserToken, undefined);
+});
+
 test("non-text and oversized frames, manual disconnect, duplicate connect, stale sockets, and notifications are controlled", async () => {
   const fixture = createClient({ extensionId: EXTENSION_ID, browserToken: "token" });
   await fixture.client.connect();

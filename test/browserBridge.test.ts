@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { BrowserBridge, type BrowserBridgeSecretStorage } from "../src/browserBridge";
 import { createBrowserBridgeMessage, reviewEnvelopeSha256, sha256Hex, type BrowserBridgeMessageV1 } from "../src/browserBridgeProtocol";
 import type { ImplementationReviewEnvelopeV1 } from "../src/gitImplementationContracts";
+import { createChatGPTReviewRequest, reviewDecisionSha256 } from "../src/reviewHandoffContracts";
 
 const EXTENSION_ID = "a".repeat(32);
 
@@ -99,6 +100,35 @@ test("review delivery requires a correlated acknowledgement and rejects disconne
     await assert.rejects(wrong, /did not match/);
     await (bridge as any).closeAuthenticated(1001, "test disconnect");
     await assert.rejects(bridge.sendImplementationReviewEnvelope(envelope), /no authenticated browser/);
+  });
+});
+
+test("review decisions require an acknowledged envelope and a matching one-time review request", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const token = await pair(bridge, now);
+    const connection = await authenticate(bridge, token, now);
+    const envelope = syntheticEnvelope();
+    const beforeDelivery = createChatGPTReviewRequest(envelope, { now, uuid: () => "00000000-0000-4000-8000-000000000010" });
+    const rejected = connectionFor();
+    await dispatch(bridge, rejected, createBrowserBridgeMessage("review_decision", { version: 1, requestId: beforeDelivery.requestId, runId: beforeDelivery.runId, envelopeSha256: beforeDelivery.envelopeSha256, verdict: "SHIP", reviewedAt: now().toISOString() }, now));
+    assert.equal(sent(rejected)[0].type, "error");
+
+    const delivery = bridge.sendImplementationReviewEnvelope(envelope);
+    const deliveryMessage = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: reviewEnvelopeSha256(envelope) }, now, deliveryMessage.id));
+    await delivery;
+
+    const request = createChatGPTReviewRequest(envelope, { now, uuid: () => "00000000-0000-4000-8000-000000000011" });
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_request", request, now));
+    const requestAck = sent(connection).at(-1)!;
+    assert.equal(requestAck.type, "ack");
+    const decision = { version: 1 as const, requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, verdict: "CHANGES_REQUESTED" as const, modelRole: "sol" as const, reasoningEffort: "high" as const, codexInstruction: "Fix this exact line 🙂\nand this one.", reviewedAt: now().toISOString() };
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", decision, now));
+    const decisionAck = sent(connection).at(-1)!;
+    assert.deepEqual(decisionAck.payload, { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256, verdict: "CHANGES_REQUESTED", decisionSha256: reviewDecisionSha256(decision) });
+    assert.equal(bridge.getLatestReviewDecision()?.decision.codexInstruction, decision.codexInstruction);
+    await dispatch(bridge, connection, createBrowserBridgeMessage("review_decision", decision, now));
+    assert.equal(sent(connection).at(-1)?.type, "error");
   });
 });
 

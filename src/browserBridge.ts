@@ -15,6 +15,13 @@ import {
   type BrowserBridgeMessageV1,
 } from "./browserBridgeProtocol";
 import { validateImplementationReviewEnvelope, type ImplementationReviewEnvelopeV1 } from "./gitImplementationContracts";
+import {
+  reviewDecisionSha256,
+  validateChatGPTReviewDecision,
+  validateChatGPTReviewRequest,
+  type ChatGPTReviewDecisionV1,
+  type ChatGPTReviewRequestV1,
+} from "./reviewHandoffContracts";
 
 const PAIRING_CODE_TTL_MS = 5 * 60_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -53,6 +60,12 @@ export interface BrowserReviewDeliveryResult {
   acknowledgedAt: string;
 }
 
+export interface BrowserReviewDecisionResult {
+  decision: ChatGPTReviewDecisionV1;
+  decisionSha256: string;
+  acknowledgedAt: string;
+}
+
 interface PairingState {
   code: string;
   expiresAtMs: number;
@@ -82,6 +95,9 @@ export class BrowserBridge {
   private pairing: PairingState | null = null;
   private authenticated: ConnectedSocket | null = null;
   private pendingDelivery: PendingDelivery | null = null;
+  private latestAcknowledgedDelivery: BrowserReviewDeliveryResult | null = null;
+  private latestReviewRequest: Pick<ChatGPTReviewRequestV1, "requestId" | "runId" | "envelopeSha256"> | null = null;
+  private latestReviewDecision: BrowserReviewDecisionResult | null = null;
   private latestTestPrompt: BrowserBridgeStatus["latestTestPrompt"] = null;
   private pairedExtensionId: string | null = null;
   private readonly trackedSockets = new Set<ConnectedSocket>();
@@ -128,6 +144,9 @@ export class BrowserBridge {
       throw new Error("Browser bridge already has a pending review delivery");
     }
     const envelopeSha256 = reviewEnvelopeSha256(envelope);
+    this.latestAcknowledgedDelivery = null;
+    this.latestReviewRequest = null;
+    this.latestReviewDecision = null;
     const message = createBrowserBridgeMessage("implementation_review_envelope", envelope, () => this.now());
     const timeoutMs = this.options.acknowledgementTimeoutMs ?? BROWSER_BRIDGE_ACK_TIMEOUT_MS;
     const result = new Promise<BrowserReviewDeliveryResult>((resolve, reject) => {
@@ -157,6 +176,15 @@ export class BrowserBridge {
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  }
+
+  getLatestReviewDecision(): BrowserReviewDecisionResult | null {
+    if (!this.latestReviewDecision) return null;
+    return {
+      decision: { ...this.latestReviewDecision.decision },
+      decisionSha256: this.latestReviewDecision.decisionSha256,
+      acknowledgedAt: this.latestReviewDecision.acknowledgedAt,
+    };
   }
 
   private async ensureListening(): Promise<void> {
@@ -290,6 +318,12 @@ export class BrowserBridge {
       this.log(`test prompt: message=${message.id} bytes=${payload.utf8Bytes} sha256=${payload.sha256}`);
       return;
     }
+    if (message.type === "review_request") {
+      return this.handleReviewRequest(connection, message);
+    }
+    if (message.type === "review_decision") {
+      return this.handleReviewDecision(connection, message);
+    }
     if (message.type === "ack") return this.handleAcknowledgement(message);
     throw new Error("Browser bridge message type is not allowed after authentication");
   }
@@ -303,7 +337,51 @@ export class BrowserBridge {
     }
     clearTimeout(pending.timeout);
     this.pendingDelivery = null;
-    pending.resolve({ bridgeMessageId: pending.messageId, runId: pending.runId, envelopeSha256: pending.envelopeSha256, acknowledgedAt: this.now().toISOString() });
+    const result = { bridgeMessageId: pending.messageId, runId: pending.runId, envelopeSha256: pending.envelopeSha256, acknowledgedAt: this.now().toISOString() };
+    this.latestAcknowledgedDelivery = result;
+    this.latestReviewRequest = null;
+    this.latestReviewDecision = null;
+    pending.resolve(result);
+  }
+
+  private handleReviewRequest(connection: ConnectedSocket, message: BrowserBridgeMessageV1): void {
+    validateChatGPTReviewRequest(message.payload);
+    const delivery = this.latestAcknowledgedDelivery;
+    const request = message.payload;
+    if (!delivery || delivery.runId !== request.runId || delivery.envelopeSha256 !== request.envelopeSha256 ||
+        this.latestReviewRequest || this.latestReviewDecision) {
+      throw new Error("ChatGPT review request is stale, duplicate, or has no acknowledged envelope");
+    }
+    this.latestReviewRequest = { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256 };
+    this.send(connection.socket, createBrowserBridgeMessage(
+      "ack",
+      { requestId: request.requestId, runId: request.runId, envelopeSha256: request.envelopeSha256 },
+      () => this.now(),
+      message.id,
+    ));
+    this.log(`review request: request=${request.requestId} run=${request.runId} sha256=${request.envelopeSha256}`);
+  }
+
+  private handleReviewDecision(connection: ConnectedSocket, message: BrowserBridgeMessageV1): void {
+    validateChatGPTReviewDecision(message.payload);
+    const decision = message.payload;
+    const request = this.latestReviewRequest;
+    const delivery = this.latestAcknowledgedDelivery;
+    if (!request || !delivery || this.latestReviewDecision ||
+        decision.requestId !== request.requestId || decision.runId !== request.runId || decision.envelopeSha256 !== request.envelopeSha256 ||
+        delivery.runId !== decision.runId || delivery.envelopeSha256 !== decision.envelopeSha256) {
+      throw new Error("ChatGPT review decision is stale, duplicate, unsolicited, or mismatched");
+    }
+    const decisionSha256 = reviewDecisionSha256(decision);
+    const acknowledgedAt = this.now().toISOString();
+    this.latestReviewDecision = { decision: { ...decision }, decisionSha256, acknowledgedAt };
+    this.send(connection.socket, createBrowserBridgeMessage(
+      "ack",
+      { requestId: decision.requestId, runId: decision.runId, envelopeSha256: decision.envelopeSha256, verdict: decision.verdict, decisionSha256 },
+      () => this.now(),
+      message.id,
+    ));
+    this.log(`review decision: request=${decision.requestId} run=${decision.runId} verdict=${decision.verdict} sha256=${decisionSha256}`);
   }
 
   private send(socket: WebSocket, message: BrowserBridgeMessageV1): void {

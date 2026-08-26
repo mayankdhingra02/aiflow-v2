@@ -24,6 +24,8 @@ export type BrowserBridgeMessageType =
   | "pong"
   | "browser_test_prompt"
   | "implementation_review_envelope"
+  | "review_request"
+  | "review_decision"
   | "ack"
   | "error";
 
@@ -51,7 +53,7 @@ export class BrowserBridgeError extends Error {
 
 const MESSAGE_TYPES = new Set<BrowserBridgeMessageType>([
   "pair_request", "pair_success", "authenticate", "authenticated", "ping", "pong",
-  "browser_test_prompt", "implementation_review_envelope", "ack", "error",
+  "browser_test_prompt", "implementation_review_envelope", "review_request", "review_decision", "ack", "error",
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

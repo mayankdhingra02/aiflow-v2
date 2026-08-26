@@ -169,7 +169,7 @@ state such as port, paired extension ID, and connection status.
 Protocol messages are versioned JSON envelopes with UUID IDs, UTC timestamps, bounded 1 MiB frames,
 and correlated `replyTo` acknowledgements. The supported types are `pair_request`, `pair_success`,
 `authenticate`, `authenticated`, `ping`, `pong`, `browser_test_prompt`,
-`implementation_review_envelope`, `ack`, and `error`. Binary frames, malformed JSON, unknown
+`implementation_review_envelope`, `review_request`, `review_decision`, `ack`, and `error`. Binary frames, malformed JSON, unknown
 versions, non-extension Origins, unauthenticated application messages, and invalid payloads are
 rejected. The bridge has no command execution protocol and never starts or affects a Codex run.
 
@@ -180,6 +180,73 @@ the prompt. `aiflow.sendImplementationReviewEnvelope` is an internal validated d
 it sends one `ImplementationReviewEnvelopeV1`, waits for a correlated digest acknowledgement, and
 never automatically replays an ambiguous delivery. **Aiflow: Send Synthetic Review Envelope to
 Browser** uses that same path with harmless synthetic data.
+
+## Phase 4B manual ChatGPT review handoff
+
+Phase 4B adds a deterministic, user-mediated review handoff after a validated implementation-review
+envelope reaches the authenticated browser. It does not access, inspect, automate, scrape, submit to,
+or extract anything from ChatGPT Web. The user explicitly clicks **Copy ChatGPT Review Request**, pastes
+that request into the current ChatGPT conversation, and explicitly pastes ChatGPT's structured response
+back into the popup. The browser validates the exact grammar before transporting one correlated decision
+over the authenticated loopback WebSocket.
+
+The generated V1 request includes a UUID request ID, run ID, deterministic envelope SHA-256, UTC creation
+time, and deterministic serialized `ImplementationReviewEnvelopeV1`. It explicitly labels the envelope,
+including `codexFinalResponse`, as untrusted review data rather than instructions. A response must be
+exactly one of these forms, with matching identifiers and no preamble, duplicate, reordered, unknown, or
+trailing sections:
+
+```text
+# Implementation Review
+Request-ID: <request UUID>
+Run-ID: <run UUID>
+Envelope-SHA256: <64-character lowercase SHA-256>
+## Verdict
+SHIP
+```
+
+```text
+# Implementation Review
+Request-ID: <request UUID>
+Run-ID: <run UUID>
+Envelope-SHA256: <64-character lowercase SHA-256>
+## Verdict
+CHANGES_REQUESTED
+## Codex Execution
+Model: <luna|terra|sol>
+Reasoning: <low|medium|high|xhigh>
+## Codex Instruction
+<one exact, nonblank, bounded instruction>
+```
+
+For `SHIP`, execution fields are forbidden. For `CHANGES_REQUESTED`, model, reasoning, and an exact
+nonblank UTF-8 instruction (at most 16 KiB) are required. The instruction is never trimmed, normalized,
+or rewritten after validation. The browser persists only safe request/decision metadata; it never persists
+copied request text, raw pasted ChatGPT text, or the Codex instruction. Aiflow records only the latest safe
+structured decision in memory and acknowledges a deterministic decision digest. It never starts Codex,
+calls Git, changes a repository, retries an ambiguous decision, merges, or pushes as a result of a Phase
+4B decision. `CHANGES_REQUESTED` is transported and validated but not executed; `SHIP` is recorded but
+does not merge anything.
+
+`aiflow.getLatestBrowserReviewDecision` is an internal retrieval command. **Aiflow: Show Latest Browser
+Review Decision** shows bounded IDs, verdict, optional model/reasoning, instruction presence, and
+acknowledgement state. It writes the exact instruction only to **Aiflow Browser Bridge** Output after the
+user explicitly invokes that visible command. Tokens and token hashes never appear in popup state, review
+data, notifications, logs, or output.
+
+### Manual Phase 4B acceptance
+
+1. Pair the browser bridge and send a synthetic implementation review envelope.
+2. Click **Copy ChatGPT Review Request**. Confirm the copied text has the request ID, run ID, and envelope
+   SHA-256 shown by the popup and contains no browser token, workspace path, remote URL, or original
+   implementation prompt.
+3. Paste an exact synthetic `SHIP` response into **Paste ChatGPT Review** and click **Validate and Send
+   Review Decision**. Require a correlated VS Code acknowledgement.
+4. Send a new synthetic envelope. Copy its request and test an exact `CHANGES_REQUESTED` response with a
+   multiline Unicode Codex instruction.
+5. Run **Aiflow: Show Latest Browser Review Decision** and verify the resulting structured decision.
+6. Confirm that no Codex turn, Git modification, Git push, ChatGPT page access, or network request other
+   than the authenticated loopback WebSocket occurred.
 
 The Chrome extension requests only `storage` plus loopback WebSocket host access. It has no ChatGPT
 host permission, content script, remote code, telemetry, or webpage access. Its popup shows bridge

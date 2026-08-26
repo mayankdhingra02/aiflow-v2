@@ -125,6 +125,33 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("aiflow.sendSyntheticReviewEnvelope", () =>
       browserBridge.sendImplementationReviewEnvelope(createSyntheticReviewEnvelope()),
     ),
+    vscode.commands.registerCommand("aiflow.getLatestBrowserReviewDecision", () =>
+      browserBridge.getLatestReviewDecision(),
+    ),
+    vscode.commands.registerCommand("aiflow.showLatestBrowserReviewDecision", () => {
+      const result = browserBridge.getLatestReviewDecision();
+      if (!result) {
+        void vscode.window.showInformationMessage("Aiflow Browser Bridge: no validated browser review decision");
+        return;
+      }
+      const decision = result.decision;
+      const summary = [
+        `Request: ${decision.requestId}`,
+        `Run: ${decision.runId}`,
+        `Verdict: ${decision.verdict}`,
+        ...(decision.verdict === "CHANGES_REQUESTED" ? [`Model: ${decision.modelRole}`, `Reasoning: ${decision.reasoningEffort}`] : []),
+        `Instruction present: ${decision.codexInstruction ? "yes" : "no"}`,
+        `Acknowledged: ${result.acknowledgedAt}`,
+      ].join("; ");
+      browserOutput.appendLine("--- Latest Browser Review Decision ---");
+      browserOutput.appendLine(summary);
+      if (decision.codexInstruction) {
+        browserOutput.appendLine("--- Codex Instruction (user-requested display) ---");
+        browserOutput.appendLine(decision.codexInstruction);
+        browserOutput.appendLine("--- End Codex Instruction ---");
+      }
+      void vscode.window.showInformationMessage(`Aiflow Browser Bridge: ${summary}`);
+    }),
   );
 }
 

@@ -23,6 +23,8 @@ chrome.runtime.onMessage.addListener((request, _sender, reply) => {
       else if (request.action === "setPort") reply(await client.setPort(request.port));
       else if (request.action === "pair") reply(await client.pair(request.pairingCode));
       else if (request.action === "sendPrompt") reply(await client.sendTestPrompt(request.text));
+      else if (request.action === "createReviewRequest") reply(await client.createReviewRequest());
+      else if (request.action === "sendReviewDecision") reply(await client.sendReviewDecision(request.text));
       else if (request.action === "revoke") reply(await client.revoke());
       else reply({ error: "Unsupported action" });
     } catch (error) { reply({ error: String(error?.message ?? error).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 300) }); }

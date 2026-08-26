@@ -22,7 +22,8 @@
     "onCommand:aiflow.pairBrowserBridge",
     "onCommand:aiflow.revokeBrowserBridge",
     "onCommand:aiflow.showBrowserBridgeStatus",
-    "onCommand:aiflow.sendSyntheticReviewEnvelope"
+    "onCommand:aiflow.sendSyntheticReviewEnvelope",
+    "onCommand:aiflow.showLatestBrowserReviewDecision"
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
@@ -64,6 +65,10 @@
       {
         "command": "aiflow.sendSyntheticReviewEnvelope",
         "title": "Aiflow: Send Synthetic Review Envelope to Browser"
+      },
+      {
+        "command": "aiflow.showLatestBrowserReviewDecision",
+        "title": "Aiflow: Show Latest Browser Review Decision"
       }
     ],
     "configuration": {

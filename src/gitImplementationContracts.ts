@@ -151,7 +151,26 @@ export function createImplementationReviewEnvelope(
 export function serializeImplementationReviewEnvelope(
   envelope: ImplementationReviewEnvelopeV1,
 ): string {
-  return JSON.stringify(envelope);
+  return JSON.stringify({
+    version: envelope.version,
+    runId: envelope.runId,
+    githubRepository: envelope.githubRepository,
+    branch: envelope.branch,
+    baseSha: envelope.baseSha,
+    headSha: envelope.headSha,
+    commitShas: envelope.commitShas,
+    pushVerified: envelope.pushVerified,
+    deliveryStatus: envelope.deliveryStatus,
+    codexOutcome: envelope.codexOutcome,
+    codexFinalResponse: envelope.codexFinalResponse,
+    modelRole: envelope.modelRole,
+    modelId: envelope.modelId,
+    reasoningEffort: envelope.reasoningEffort,
+    conversationId: envelope.conversationId,
+    turnId: envelope.turnId,
+    startedAt: envelope.startedAt,
+    finishedAt: envelope.finishedAt,
+  });
 }
 
 export function validateImplementationReviewEnvelope(
