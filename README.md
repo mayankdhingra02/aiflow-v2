@@ -5,6 +5,9 @@ accepted bootstrap and exact-turn correlation into one app-lifetime worker and e
 Phase 3 adds Git delivery evidence around that same worker; Aiflow verifies delivery but never
 creates an implementation commit or pushes a target repository itself.
 
+Phase 1, Phase 2, and Phase 3 are accepted. Phase 4A adds secure localhost transport only; it does
+not access, inspect, automate, or submit anything to ChatGPT Web.
+
 The integration is pinned to:
 
 - Extension ID: `openai.chatgpt`
@@ -146,6 +149,55 @@ The result can be converted to deterministic JSON with `createImplementationRevi
 `serializeImplementationReviewEnvelope()`. Its V1 envelope includes run/delivery/Git evidence and
 Codex identifiers/settings/timestamps, but excludes workspace paths, remote URLs, credentials,
 session content, and the submitted prompt.
+
+## Phase 4A browser bridge
+
+Phase 4A is an explicit, user-started WebSocket bridge between the selected Aiflow VS Code window
+and the unpacked extension in `browser/aiflow-chatgpt-bridge`. It listens only on `127.0.0.1`, never
+starts automatically, and defaults to port `47323`. Set `aiflow.browserBridge.port` to an integer
+from `1024` through `65535` when a different local port is needed. A busy port is an error; Aiflow
+never silently selects another address or port.
+
+Run **Aiflow: Pair Browser Bridge** to start the server and show a one-time, five-minute pairing
+code. The browser supplies that code only from its `chrome-extension://<extension-id>` origin. On
+success, Aiflow stores the extension ID and only a SHA-256 hash of a new browser token in VS Code
+SecretStorage; the browser keeps the plain token in `chrome.storage.local`. Later connections must
+authenticate first. **Aiflow: Revoke Browser Pairing** clears both Aiflow secrets, invalidates any
+code, and closes the browser connection. **Aiflow: Show Browser Bridge Status** exposes only safe
+state such as port, paired extension ID, and connection status.
+
+Protocol messages are versioned JSON envelopes with UUID IDs, UTC timestamps, bounded 1 MiB frames,
+and correlated `replyTo` acknowledgements. The supported types are `pair_request`, `pair_success`,
+`authenticate`, `authenticated`, `ping`, `pong`, `browser_test_prompt`,
+`implementation_review_envelope`, `ack`, and `error`. Binary frames, malformed JSON, unknown
+versions, non-extension Origins, unauthenticated application messages, and invalid payloads are
+rejected. The bridge has no command execution protocol and never starts or affects a Codex run.
+
+The browser test-prompt transport accepts only nonblank text up to 128 KiB when its claimed UTF-8
+byte count and lowercase SHA-256 exactly match the original bytes. Aiflow keeps only in-memory
+metadata (message ID, bytes, digest, timestamp), acknowledges it, and neither executes nor persists
+the prompt. `aiflow.sendImplementationReviewEnvelope` is an internal validated delivery command;
+it sends one `ImplementationReviewEnvelopeV1`, waits for a correlated digest acknowledgement, and
+never automatically replays an ambiguous delivery. **Aiflow: Send Synthetic Review Envelope to
+Browser** uses that same path with harmless synthetic data.
+
+The Chrome extension requests only `storage` plus loopback WebSocket host access. It has no ChatGPT
+host permission, content script, remote code, telemetry, or webpage access. Its popup shows bridge
+state, pairing controls, exact-prompt byte/digest preview, and a persisted latest validated review
+envelope without ever rendering the browser token.
+
+### Manual Phase 4A acceptance
+
+1. In Chrome, load `browser/aiflow-chatgpt-bridge` with **Load unpacked**.
+2. Start an Aiflow Extension Development Host and run **Aiflow: Pair Browser Bridge**.
+3. Enter the one-time code in the popup and require authenticated status.
+4. Send exactly `AIFLOW_BRIDGE_TEST_🙂`, then a newline, then `second line`; require matching UTF-8
+   byte count and SHA-256 acknowledgement.
+5. Run **Aiflow: Send Synthetic Review Envelope to Browser** and require the popup to show its run
+   ID, repository, branch, head SHA, delivery status, and push verification.
+6. Close and reopen the popup and require the paired connection to recover.
+7. Revoke pairing in VS Code and require browser authentication to fail until it is paired again.
+8. Confirm no Codex turn, Git commit, Git push, or ChatGPT Web interaction occurred.
 
 Example (values abbreviated):
 

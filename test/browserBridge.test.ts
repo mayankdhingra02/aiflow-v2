@@ -1,0 +1,168 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
+import { test } from "node:test";
+import { WebSocket, WebSocketServer } from "ws";
+
+import { BrowserBridge, type BrowserBridgeSecretStorage } from "../src/browserBridge";
+import { createBrowserBridgeMessage, reviewEnvelopeSha256, sha256Hex, type BrowserBridgeMessageV1 } from "../src/browserBridgeProtocol";
+import type { ImplementationReviewEnvelopeV1 } from "../src/gitImplementationContracts";
+
+const EXTENSION_ID = "a".repeat(32);
+
+test("browser bridge server factory receives only the loopback bind address", async () => {
+  let captured: { host: string; port: number; maxPayload: number } | null = null;
+  const bridge = new BrowserBridge({
+    port: () => 47_323,
+    secrets: new MemorySecrets(),
+    serverFactory: (options) => {
+      captured = options;
+      return new FakeServer(options.port) as unknown as WebSocketServer;
+    },
+  });
+  try {
+    await bridge.beginPairing();
+    assert.deepEqual(captured, { host: "127.0.0.1", port: 47_323, maxPayload: 1_048_576 });
+  } finally { await bridge.dispose(); }
+});
+
+test("pairing is single-use, persists only a token hash, and requires the extension Origin", async () => {
+  await withBridge(async ({ bridge, secrets, now }) => {
+    const pairing = await bridge.beginPairing();
+    assert.match(pairing.pairingCode, /^[0-9a-f]{32}$/);
+    const connection = connectionFor();
+    await dispatch(bridge, connection, createBrowserBridgeMessage("pair_request", { extensionId: EXTENSION_ID, pairingCode: pairing.pairingCode }, now));
+    const paired = sent(connection)[0];
+    assert.equal(paired.type, "pair_success");
+    assert.equal((paired.payload as Record<string, unknown>).extensionId, EXTENSION_ID);
+    assert.equal(secrets.values.get("aiflow.browserBridge.extensionId"), EXTENSION_ID);
+    assert.match(secrets.values.get("aiflow.browserBridge.browserTokenHash") ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(JSON.stringify([...secrets.values.values()]).includes(String((paired.payload as Record<string, unknown>).browserToken)), false);
+    const reused = connectionFor();
+    await dispatch(bridge, reused, createBrowserBridgeMessage("pair_request", { extensionId: EXTENSION_ID, pairingCode: pairing.pairingCode }, now));
+    assert.equal(sent(reused)[0].type, "error");
+    assert.equal((reused.socket as unknown as FakeSocket).closed, true);
+  });
+});
+
+test("authentication gates application messages, validates exact prompts, and revocation closes the browser", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const token = await pair(bridge, now);
+    const unpaired = connectionFor();
+    await dispatch(bridge, unpaired, createBrowserBridgeMessage("ping", {}, now));
+    assert.equal(sent(unpaired)[0].type, "error");
+    const authenticated = await authenticate(bridge, token, now);
+    const text = "AIFLOW_BRIDGE_TEST_🙂\nsecond line";
+    await dispatch(bridge, authenticated, createBrowserBridgeMessage("browser_test_prompt", { text, utf8Bytes: Buffer.byteLength(text), sha256: sha256Hex(text) }, now));
+    assert.equal(sent(authenticated).at(-1)?.type, "ack");
+    assert.equal((await bridge.status()).latestTestPrompt?.utf8Bytes, Buffer.byteLength(text));
+    await bridge.revoke();
+    assert.equal((authenticated.socket as unknown as FakeSocket).closed, true);
+    assert.equal((await bridge.status()).pairedExtensionId, null);
+  });
+});
+
+test("review delivery requires a correlated acknowledgement and rejects disconnected or wrong acknowledgements", async () => {
+  await withBridge(async ({ bridge, now }) => {
+    const token = await pair(bridge, now);
+    const connection = await authenticate(bridge, token, now);
+    const envelope = syntheticEnvelope();
+    const delivery = bridge.sendImplementationReviewEnvelope(envelope);
+    const outbound = sent(connection).at(-1)!;
+    assert.equal(outbound.type, "implementation_review_envelope");
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: reviewEnvelopeSha256(envelope) }, now, outbound.id));
+    assert.equal((await delivery).runId, envelope.runId);
+    const wrong = bridge.sendImplementationReviewEnvelope(envelope);
+    const next = sent(connection).at(-1)!;
+    await dispatch(bridge, connection, createBrowserBridgeMessage("ack", { runId: envelope.runId, sha256: "0".repeat(64) }, now, next.id));
+    await assert.rejects(wrong, /did not match/);
+    await (bridge as any).closeAuthenticated(1001, "test disconnect");
+    await assert.rejects(bridge.sendImplementationReviewEnvelope(envelope), /no authenticated browser/);
+  });
+});
+
+test("expired pairing, invalid web origins, binary frames, and replacement connections are rejected deterministically", async () => {
+  await withBridge(async ({ bridge, now, advance }) => {
+    const pairing = await bridge.beginPairing();
+    advance(5 * 60_000 + 1);
+    const expired = connectionFor();
+    await dispatch(bridge, expired, createBrowserBridgeMessage("pair_request", { extensionId: EXTENSION_ID, pairingCode: pairing.pairingCode }, now));
+    assert.equal(sent(expired)[0].type, "error");
+    const fresh = await pair(bridge, now);
+    const web = connectionFor("https://chatgpt.com");
+    await dispatch(bridge, web, createBrowserBridgeMessage("authenticate", { extensionId: EXTENSION_ID, browserToken: fresh }, now));
+    assert.equal(sent(web)[0].type, "error");
+    const first = await authenticate(bridge, fresh, now);
+    const second = await authenticate(bridge, fresh, now);
+    assert.equal((first.socket as unknown as FakeSocket).closed, true);
+    await (bridge as any).onMessage(second, Buffer.from("binary"), true);
+    assert.equal((second.socket as unknown as FakeSocket).closed, true);
+  });
+});
+
+async function withBridge(run: (fixture: { bridge: BrowserBridge; secrets: MemorySecrets; now: () => Date; advance: (milliseconds: number) => void }) => Promise<void>): Promise<void> {
+  let instant = new Date("2026-08-26T12:00:00.000Z");
+  const now = () => instant;
+  const secrets = new MemorySecrets();
+  const bridge = new BrowserBridge({
+    port: () => 47_901,
+    secrets,
+    now,
+    acknowledgementTimeoutMs: 20,
+    serverFactory: () => new FakeServer(47_901) as unknown as WebSocketServer,
+  });
+  try { await run({ bridge, secrets, now, advance: (milliseconds) => { instant = new Date(instant.getTime() + milliseconds); } }); }
+  finally { await bridge.dispose(); }
+}
+
+function connectionFor(origin = `chrome-extension://${EXTENSION_ID}`) {
+  return { socket: new FakeSocket() as unknown as WebSocket, origin, authenticated: false, extensionId: null };
+}
+
+async function dispatch(bridge: BrowserBridge, connection: ReturnType<typeof connectionFor>, message: BrowserBridgeMessageV1): Promise<void> {
+  await (bridge as any).onMessage(connection, Buffer.from(JSON.stringify(message), "utf8"), false);
+}
+
+function sent(connection: ReturnType<typeof connectionFor>): BrowserBridgeMessageV1[] {
+  return ((connection.socket as unknown as FakeSocket).sent).map((value) => JSON.parse(value) as BrowserBridgeMessageV1);
+}
+
+async function pair(bridge: BrowserBridge, now: () => Date): Promise<string> {
+  const pairing = await bridge.beginPairing();
+  const connection = connectionFor();
+  await dispatch(bridge, connection, createBrowserBridgeMessage("pair_request", { extensionId: EXTENSION_ID, pairingCode: pairing.pairingCode }, now));
+  return (sent(connection)[0].payload as Record<string, string>).browserToken;
+}
+
+async function authenticate(bridge: BrowserBridge, token: string, now: () => Date) {
+  const connection = connectionFor();
+  await dispatch(bridge, connection, createBrowserBridgeMessage("authenticate", { extensionId: EXTENSION_ID, browserToken: token }, now));
+  assert.equal(sent(connection)[0].type, "authenticated");
+  return connection;
+}
+
+class MemorySecrets implements BrowserBridgeSecretStorage {
+  readonly values = new Map<string, string>();
+  async get(key: string) { return this.values.get(key); }
+  async store(key: string, value: string) { this.values.set(key, value); }
+  async delete(key: string) { this.values.delete(key); }
+}
+
+class FakeServer extends EventEmitter {
+  constructor(private readonly port: number) { super(); queueMicrotask(() => this.emit("listening")); }
+  address() { return { port: this.port }; }
+  close(callback: () => void) { callback(); return this; }
+}
+
+class FakeSocket {
+  readyState: number = WebSocket.OPEN;
+  sent: string[] = [];
+  closed = false;
+  send(value: string) { this.sent.push(value); }
+  close() { this.closed = true; this.readyState = WebSocket.CLOSED; }
+}
+
+function syntheticEnvelope(): ImplementationReviewEnvelopeV1 {
+  const time = "2026-08-26T12:00:00.000Z";
+  return { version: 1, runId: randomUUID(), githubRepository: "synthetic/aiflow-bridge", branch: "main", baseSha: "0".repeat(40), headSha: "1".repeat(40), commitShas: [], pushVerified: false, deliveryStatus: "no_commit", codexOutcome: "cancelled", codexFinalResponse: "Synthetic transport test", modelRole: "terra", modelId: "gpt-5.6-codex", reasoningEffort: "medium", conversationId: randomUUID(), turnId: randomUUID(), startedAt: time, finishedAt: time };
+}

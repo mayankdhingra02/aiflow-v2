@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Aiflow Browser Bridge",
+  "version": "0.1.0",
+  "description": "Authenticated localhost transport for Aiflow review envelopes.",
+  "permissions": ["storage"],
+  "host_permissions": ["ws://127.0.0.1/*"],
+  "background": { "service_worker": "background.mjs", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Aiflow Browser Bridge" }
+}

@@ -1,0 +1,1 @@
+body { font: 13px system-ui; width: 330px; margin: 12px; } main { display: grid; gap: 8px; } h1, h2 { margin: 0; } textarea, input { box-sizing: border-box; width: 100%; } textarea { height: 90px; } pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f4f4f4; padding: 8px; } button { width: max-content; }

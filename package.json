@@ -18,7 +18,11 @@
     "onCommand:aiflow.runClipboardGitImplementation",
     "onCommand:aiflow.cancelActiveOfficialCodexRun",
     "onCommand:aiflow.runOfficialCodexProbe",
-    "onCommand:aiflow.cancelOfficialCodexProbe"
+    "onCommand:aiflow.cancelOfficialCodexProbe",
+    "onCommand:aiflow.pairBrowserBridge",
+    "onCommand:aiflow.revokeBrowserBridge",
+    "onCommand:aiflow.showBrowserBridgeStatus",
+    "onCommand:aiflow.sendSyntheticReviewEnvelope"
   ],
   "main": "./dist/src/extension.js",
   "contributes": {
@@ -44,6 +48,22 @@
         "command": "aiflow.cancelOfficialCodexProbe",
         "title": "Cancel Official Codex Probe",
         "category": "Aiflow"
+      },
+      {
+        "command": "aiflow.pairBrowserBridge",
+        "title": "Aiflow: Pair Browser Bridge"
+      },
+      {
+        "command": "aiflow.revokeBrowserBridge",
+        "title": "Aiflow: Revoke Browser Pairing"
+      },
+      {
+        "command": "aiflow.showBrowserBridgeStatus",
+        "title": "Aiflow: Show Browser Bridge Status"
+      },
+      {
+        "command": "aiflow.sendSyntheticReviewEnvelope",
+        "title": "Aiflow: Send Synthetic Review Envelope to Browser"
       }
     ],
     "configuration": {
@@ -55,17 +75,28 @@
           "minimum": 3,
           "maximum": 240,
           "description": "Maximum duration in minutes for one real Official Codex turn."
+        },
+        "aiflow.browserBridge.port": {
+          "type": "integer",
+          "default": 47323,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Loopback port for the authenticated Aiflow Browser Bridge."
         }
       }
     }
   },
   "scripts": {
     "compile": "tsc -p .",
-    "test": "npm run compile && node --test dist/test/*.test.js"
+    "test": "npm run compile && node --test dist/test/*.test.js browser/aiflow-chatgpt-bridge/test/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/vscode": "^1.96.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }
