@@ -10,9 +10,11 @@ import {
   createImplementationReviewEnvelope,
   GitImplementationError,
   serializeImplementationReviewEnvelope,
+  validateImplementationReviewEnvelope,
   validateGitImplementationRunRequest,
   type GitImplementationRunRequest,
 } from "../src/gitImplementationContracts";
+import { reviewEnvelopeSha256 } from "../src/browserBridgeProtocol";
 import { GitInspection, isSafeRemoteName, parseGitHubRepository, type GitRunner } from "../src/gitInspection";
 import { GitImplementationCommandController, type GitImplementationCommandUi, type GitImplementationRunService } from "../src/gitImplementationCommands";
 import { GitImplementationService } from "../src/gitImplementationService";
@@ -253,6 +255,22 @@ test("review envelope serialization is deterministic and excludes local workspac
   assert.equal(serialized.includes(WORKSPACE), false);
   assert.equal(serialized.includes("github.com"), false);
   assert.equal(serialized.includes("do not serialize this prompt"), false);
+});
+
+test("review envelope accepts UUIDv7 Official Codex correlations without loosening local run IDs", () => {
+  const result = { runId: "00000000-0000-4000-8000-000000000001", deliveryStatus: "verified", codex: { outcome: "completed", finalResponse: "done", requestedModelRole: "terra", requestedModelId: "gpt-5.6-codex", requestedReasoningEffort: "medium", recordedModelId: null, recordedReasoningEffort: null, conversationId: "01a04025-4a6c-78d3-a1b1-eeb401a868f1", turnId: "01a04025-67bd-7bb2-b2be-9eae0e010db3", startedAt: "2026-08-26T12:00:00.000Z", finishedAt: "2026-08-26T12:00:00.000Z" }, git: { githubRepository: "Owner/repository", branch: "main", baseSha: "a".repeat(40), headSha: "b".repeat(40), commitShas: [], pushVerified: true, workingTreeClean: true, upstreamRemote: "origin", upstreamRef: "origin/main", remoteHeadSha: "b".repeat(40) } } as any;
+  const envelope = createImplementationReviewEnvelope(result);
+  assert.doesNotThrow(() => validateImplementationReviewEnvelope(envelope));
+  assert.equal(envelope.conversationId, result.codex.conversationId); assert.equal(envelope.turnId, result.codex.turnId);
+  const serialized = serializeImplementationReviewEnvelope(envelope);
+  assert.equal(serialized, serializeImplementationReviewEnvelope(envelope));
+  assert.equal(reviewEnvelopeSha256(envelope), reviewEnvelopeSha256(envelope));
+  const v4 = { ...envelope, conversationId: "00000000-0000-4000-8000-000000000003", turnId: "00000000-0000-4000-8000-000000000004" };
+  assert.doesNotThrow(() => validateImplementationReviewEnvelope(v4));
+  for (const value of ["01a04025-4a6c-08d3-a1b1-eeb401a868f1", "01a04025-4a6c-78d3-71b1-eeb401a868f1", "00000000-0000-0000-0000-000000000000", "x01a04025-4a6c-78d3-a1b1-eeb401a868f1", "01a04025-4a6c-78d3-a1b1-eeb401a868f1x", " 01a04025-4a6c-78d3-a1b1-eeb401a868f1", "01a04025-4a6c-78d3-a1b1-eeb401a868fg"]) {
+    assert.throws(() => validateImplementationReviewEnvelope({ ...envelope, conversationId: value }));
+  }
+  assert.throws(() => validateImplementationReviewEnvelope({ ...envelope, runId: "01a04025-4a6c-78d3-a1b1-eeb401a868f1" }));
 });
 
 test("concurrent Git implementation execution is rejected at the service boundary", async () => {

@@ -6,6 +6,7 @@ export const MAX_REVIEW_HANDOFF_BYTES = 256 * 1024;
 
 const TYPES = new Set(["pair_request", "pair_success", "authenticate", "authenticated", "ping", "pong", "browser_test_prompt", "implementation_review_envelope", "review_request", "review_decision", "ack", "error"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OFFICIAL_CODEX_CORRELATION_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 const OBJECT_ID = /^[0-9a-f]{40,64}$/i;
 const DELIVERY = new Set(["verified", "codex_not_completed", "branch_changed", "history_rewritten", "no_commit", "working_tree_dirty", "repository_mismatch", "push_not_verified", "git_inspection_failed"]);
@@ -47,7 +48,7 @@ export function validateReviewEnvelope(value) {
   if (!isRecord(value) || value.version !== 1 || typeof value.pushVerified !== "boolean" || !Array.isArray(value.commitShas)) throw new Error("Invalid review envelope");
   const strings = ["runId", "githubRepository", "branch", "baseSha", "headSha", "deliveryStatus", "codexOutcome", "codexFinalResponse", "modelRole", "modelId", "reasoningEffort", "conversationId", "turnId", "startedAt", "finishedAt"];
   if (strings.some((key) => typeof value[key] !== "string") || value.commitShas.some((commit) => typeof commit !== "string") ||
-      !UUID.test(value.runId) || !UUID.test(value.conversationId) || !UUID.test(value.turnId) ||
+      !UUID.test(value.runId) || !OFFICIAL_CODEX_CORRELATION_UUID.test(value.conversationId) || !OFFICIAL_CODEX_CORRELATION_UUID.test(value.turnId) ||
       !REPOSITORY.test(value.githubRepository) || !OBJECT_ID.test(value.baseSha) || !OBJECT_ID.test(value.headSha) ||
       !value.commitShas.every((commit) => OBJECT_ID.test(commit)) || !DELIVERY.has(value.deliveryStatus) ||
       !OUTCOMES.has(value.codexOutcome) || !ROLES.has(value.modelRole) || !EFFORTS.has(value.reasoningEffort) ||

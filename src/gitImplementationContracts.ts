@@ -200,8 +200,8 @@ export function validateImplementationReviewEnvelope(
       !REASONING_EFFORTS.has(envelope.reasoningEffort as string) ||
       (envelope.branch as string).length === 0 || (envelope.branch as string).length > MAX_BRANCH_LENGTH ||
       /[\0\r\n]/.test(envelope.branch as string) || (envelope.codexFinalResponse as string).length > 4_000 ||
-      !isUuid(envelope.runId as string) || !isUuid(envelope.conversationId as string) ||
-      !isUuid(envelope.turnId as string) || !isUtcIso(envelope.startedAt as string) ||
+      !isLocalUuid(envelope.runId as string) || !isOfficialCodexCorrelationUuid(envelope.conversationId as string) ||
+      !isOfficialCodexCorrelationUuid(envelope.turnId as string) || !isUtcIso(envelope.startedAt as string) ||
       !isUtcIso(envelope.finishedAt as string)) {
     throw new Error("Implementation review envelope contains invalid identifiers");
   }
@@ -221,8 +221,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isUuid(value: string): boolean {
+function isLocalUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function isOfficialCodexCorrelationUuid(value: string): boolean {
+  return /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function isUtcIso(value: string): boolean {

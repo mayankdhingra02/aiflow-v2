@@ -45,6 +45,14 @@ test("explicit browser result delivery accepts only a fully correlated acknowled
   assert.equal(store.get()?.runId, value.runId);
 });
 
+test("latest result delivery preserves UUIDv7 Official Codex correlations", async () => {
+  const store = new LatestGitImplementationResultStore(); const value = result({ runId: "00000000-0000-4000-8000-000000000051" } as any);
+  value.codex.conversationId = "01a04025-4a6c-78d3-a1b1-eeb401a868f1"; value.codex.turnId = "01a04025-67bd-7bb2-b2be-9eae0e010db3"; store.replace(value);
+  const sent: any[] = []; const controller = new LatestGitResultBrowserDeliveryController(store, { sendImplementationReviewEnvelope: async (envelope: any) => { sent.push(envelope); return { bridgeMessageId: "00000000-0000-4000-8000-000000000052", runId: envelope.runId, envelopeSha256: requireDigest(envelope), acknowledgedAt: "2026-01-01T00:00:00.000Z" }; } }, { appendOutput: () => undefined, showInformation: () => undefined, showError: () => undefined });
+  await controller.send();
+  assert.equal(sent.length, 1); assert.equal(sent[0].conversationId, value.codex.conversationId); assert.equal(sent[0].turnId, value.codex.turnId); assert.equal(store.get()?.runId, value.runId);
+});
+
 test("returned unavailable Git evidence retains terminal outcomes without a fabricated result head", () => {
   for (const [outcome, delivery] of [["failed", "codex_not_completed"], ["cancelled", "codex_not_completed"], ["completed", "git_inspection_failed"], ["completed", "branch_changed"]] as const) {
     const patch = terminalResultRecordPatch({ ...result({ runId: randomUUID() } as any), deliveryStatus: delivery, codex: { ...result({ runId: randomUUID() } as any).codex, outcome }, git: { ...result({ runId: randomUUID() } as any).git, headSha: "", pushVerified: false } } as any, () => new Date("2026-01-01T00:00:00.000Z"));
